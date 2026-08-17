@@ -220,7 +220,7 @@ export async function addReceipt(
     await c.query(
       `INSERT INTO stock_receipts (firm_id, id, stock_day_id, grade_id, qty, sap_qty, ref)
        VALUES (?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
+       ON DUPLICATE KEY UPDATE grade_id = VALUES(grade_id), qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
       [firmId, id, day.id, r.gradeId, r.qty, r.sapQty, r.ref],
     );
     await bumpDay(c, firmId, day.id, userId);

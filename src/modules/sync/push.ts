@@ -323,12 +323,15 @@ async function stockDayUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
     await ctx.c.query('UPDATE stock_days SET deleted_at = NULL, rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?', [ctx.userId, ctx.firmId, day.id]);
   }
 
-  // Receipts: additive by id.
+  // Receipts: additive by id (removals come through DELETE .../receipts/:id).
+  // grade_id is updated too: the client can edit a receipt's grade, and leaving
+  // it out silently kept the old grade server-side — the edit looked applied on
+  // the device and then reverted on the next pull.
   for (const r of m.data?.receipts ?? []) {
     if (!isUuid(r.id) || !isUuid(r.gradeId)) return reject(m, 'VALIDATION_FAILED', 'receipt needs id + gradeId');
     await ctx.c.query(
       `INSERT INTO stock_receipts (firm_id, id, stock_day_id, grade_id, qty, sap_qty, ref) VALUES (?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
+       ON DUPLICATE KEY UPDATE grade_id = VALUES(grade_id), qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
       [ctx.firmId, r.id, day.id, r.gradeId, num(r.qty), num(r.sapQty), String(r.ref ?? '')],
     );
   }
