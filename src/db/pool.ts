@@ -24,11 +24,22 @@ export function getPool(): mysql.Pool {
     connectTimeout: 10000,
     ...(cfg.TIDB_TLS ? { ssl: { minVersion: 'TLSv1.2' as const, rejectUnauthorized: true } } : {}),
   });
-  // Session runs at UTC so DATETIME(3) defaults/updates are UTC (§5.7).
-  pool.on('connection', (conn) => {
-    conn.query("SET time_zone = '+00:00'").catch(() => {});
-  });
+  setSessionDefaults(pool);
   return pool;
+}
+
+/**
+ * Session runs at UTC so DATETIME(3) defaults/updates are UTC (§5.7).
+ * The `connection` event hands back the *core* (callback-style) connection, not
+ * the promise wrapper — calling `.then()/.catch()` on its `query()` result makes
+ * mysql2 swallow the command and the connection never completes its first query.
+ * The callback form is the only correct one here.
+ */
+function setSessionDefaults(p: mysql.Pool): void {
+  p.on('connection', (conn) => {
+    // 30s ceiling on read-only statements so a runaway scan cannot pin a pool slot.
+    (conn as any).query("SET time_zone = '+00:00', max_execution_time = 30000", () => {});
+  });
 }
 
 /** Test-scope override: build a pool from an explicit URL (mysql://user:pass@host:port/db). */
@@ -51,13 +62,11 @@ export function initPoolFromUrl(url: string): mysql.Pool {
     connectTimeout: 10000,
     ...(tls ? { ssl: { minVersion: 'TLSv1.2' as const, rejectUnauthorized: true } } : {}),
   });
-  pool.on('connection', (conn) => {
-    conn.query("SET time_zone = '+00:00'").catch(() => {});
-  });
+  setSessionDefaults(pool);
   return pool;
 }
 
-export type Q = Pick<mysql.PoolConnection, 'query' | 'execute'> | mysql.Pool;
+export type Q =Pick<mysql.PoolConnection, 'query' | 'execute'> | mysql.Pool;
 
 /** Run a function inside a pessimistic transaction (TiDB default since v5.0). */
 export async function tx<T>(fn: (c: mysql.PoolConnection) => Promise<T>): Promise<T> {
@@ -95,9 +104,13 @@ export async function pingDb(): Promise<boolean> {
   }
 }
 
-/** 5s statement timeout for CRUD paths; import uses raw queries with its own budget. */
+/**
+ * Plain pooled query. NOTE: mysql2 has no per-query `timeout` option (that is a
+ * `mysql`-package feature and is silently ignored), so statement budgets are
+ * enforced server-side via `max_execution_time` — see setSessionDefaults.
+ */
 export async function q<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
-  const [rows] = await getPool().query({ sql, timeout: 5000 } as any, params);
+  const [rows] = await getPool().query(sql, params);
   return rows as T[];
 }
 

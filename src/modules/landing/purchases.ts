@@ -85,7 +85,9 @@ export async function createPurchase(firmId: string, userId: string, d: Purchase
   const paid = (d.payments ?? []).reduce((a, p) => a + p.amount, 0);
   void billValue;
   void paid;
-  return tx(async (c) => {
+  // Read-back runs after commit: `fetchPurchase` takes its own pooled connection,
+  // and nesting that inside the transaction deadlocks the pool under concurrency.
+  await tx(async (c) => {
     try {
       await c.query(
         `INSERT INTO purchases (firm_id, id, date, company_id, grade_id, source_id, qty, rate_per_bag, invoice_no, updated_by)
@@ -96,7 +98,7 @@ export async function createPurchase(firmId: string, userId: string, d: Purchase
       if (!isDuplicateKey(e)) throw e;
       const [rows] = await c.query('SELECT deleted_at FROM purchases WHERE firm_id = ? AND id = ?', [firmId, id]);
       const row = (rows as any[])[0];
-      if (row && row.deleted_at === null) return (await fetchPurchase(firmId, id))!; // idempotent re-insert (§1.2)
+      if (row && row.deleted_at === null) return; // idempotent re-insert (§1.2)
       await c.query('DELETE FROM purchases WHERE firm_id = ? AND id = ?', [firmId, id]); // purge tombstone, recreate fresh
       await c.query(
         `INSERT INTO purchases (firm_id, id, date, company_id, grade_id, source_id, qty, rate_per_bag, invoice_no, updated_by)
@@ -105,8 +107,8 @@ export async function createPurchase(firmId: string, userId: string, d: Purchase
       );
     }
     await writePayments(c, firmId, id, d.payments ?? []);
-    return (await fetchPurchase(firmId, id))!;
   });
+  return (await fetchPurchase(firmId, id))!;
 }
 
 const COL: Record<string, string> = {

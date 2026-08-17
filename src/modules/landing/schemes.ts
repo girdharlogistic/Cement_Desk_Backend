@@ -112,20 +112,22 @@ export async function createScheme(firmId: string, userId: string, d: SchemeWrit
   validateScheme(toInput(d));
   await checkCompany(firmId, d.companyId);
   const id = d.id ?? newId();
-  return tx(async (c) => {
+  // Read-back runs after commit: `fetchScheme` takes its own pooled connection,
+  // and nesting that inside the transaction deadlocks the pool under concurrency.
+  await tx(async (c) => {
     try {
       await c.query(INSERT_SQL, insertParams(firmId, id, d, userId));
     } catch (e) {
       if (!isDuplicateKey(e)) throw e;
       const [rows] = await c.query('SELECT deleted_at FROM schemes WHERE firm_id = ? AND id = ?', [firmId, id]);
       const row = (rows as any[])[0];
-      if (row && row.deleted_at === null) return (await fetchScheme(firmId, id))!; // idempotent (§1.2)
+      if (row && row.deleted_at === null) return; // idempotent (§1.2)
       await c.query('DELETE FROM schemes WHERE firm_id = ? AND id = ?', [firmId, id]);
       await c.query(INSERT_SQL, insertParams(firmId, id, d, userId));
     }
     await writeChildren(c, firmId, id, d);
-    return (await fetchScheme(firmId, id))!;
   });
+  return (await fetchScheme(firmId, id))!;
 }
 
 export async function patchScheme(firmId: string, userId: string, id: string, patch: Partial<SchemeWrite>, ifMatch: number | null): Promise<any> {

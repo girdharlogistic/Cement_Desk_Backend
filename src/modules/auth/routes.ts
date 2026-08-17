@@ -4,6 +4,7 @@ import { parse } from '../../lib/validate';
 import { enforceLimit } from '../../lib/limiter';
 import { errors } from '../../lib/errors';
 import { authenticate } from '../../plugins/guards';
+import { OTP_LENGTH, OTP_RESEND_COOLDOWN_SECONDS, OTP_RESEND_PER_HOUR } from '../../lib/otp';
 import * as svc from './service';
 
 const passwordSchema = z
@@ -34,8 +35,15 @@ const patchMeSchema = z.object({
 });
 const changePwSchema = z.object({ currentPassword: z.string().min(1), newPassword: passwordSchema });
 const forgotSchema = z.object({ email: z.string().email() });
-const resetSchema = z.object({ token: z.string().min(16), newPassword: passwordSchema });
-const verifySchema = z.object({ token: z.string().min(16) });
+const otpSchema = z
+  .string()
+  .regex(new RegExp(`^\\d{${OTP_LENGTH}}$`), `Enter the ${OTP_LENGTH}-digit code from your email`);
+const resetSchema = z.object({
+  email: z.string().email(),
+  code: otpSchema,
+  newPassword: passwordSchema,
+});
+const verifySchema = z.object({ code: otpSchema });
 
 const HOUR = 3600_000;
 const MIN15 = 900_000;
@@ -94,18 +102,35 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   });
 
   app.post('/auth/reset-password', async (req, reply) => {
+    // The code itself is only 5 guesses deep, but that is per code. Without an
+    // IP ceiling an attacker could request-and-guess in a loop, so cap the
+    // whole flow too.
+    enforceLimit(`reset:ip:${req.ip}`, 20, HOUR);
     const body = parse(resetSchema, req.body);
-    await svc.resetPassword(body.token, body.newPassword);
-    reply.code(204);
-  });
-
-  app.post('/auth/verify-email', async (req, reply) => {
-    const body = parse(verifySchema, req.body);
-    await svc.verifyEmail(body.token);
+    enforceLimit(`reset:email:${body.email.toLowerCase()}`, 10, HOUR);
+    await svc.resetPassword(body.email, body.code, body.newPassword);
     reply.code(204);
   });
 
   // ---- authenticated ----
+
+  // Verification is done from inside the app, so these two are the only
+  // authenticated routes an UNVERIFIED account can reach with a session.
+  app.post('/auth/verify-email', { preHandler: [authenticate] }, async (req) => {
+    enforceLimit(`verify:user:${req.userId}`, 20, HOUR);
+    const body = parse(verifySchema, req.body);
+    // Returned rather than 204: the app flips out of the OTP screen on
+    // `emailVerified`, and this saves it a follow-up GET /auth/me to see it.
+    return { user: await svc.verifyEmail(req.userId, body.code) };
+  });
+
+  app.post('/auth/resend-verification', { preHandler: [authenticate] }, async (req, reply) => {
+    enforceLimit(`resend:user:${req.userId}`, 1, OTP_RESEND_COOLDOWN_SECONDS * 1000);
+    enforceLimit(`resend:user:hour:${req.userId}`, OTP_RESEND_PER_HOUR, HOUR);
+    await svc.resendVerification(req.userId);
+    reply.code(204);
+  });
+
   app.post('/auth/logout-all', { preHandler: [authenticate] }, async (req, reply) => {
     await svc.logoutAll(req.userId);
     reply.code(204);

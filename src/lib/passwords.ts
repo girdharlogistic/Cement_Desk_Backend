@@ -19,6 +19,18 @@ export async function verifyPassword(hash: string, password: string): Promise<bo
   }
 }
 
-/** Dummy hash to equalize timing on login with unknown email (account-enumeration defence). */
-export const DUMMY_HASH_PROMISE = () =>
-  argonHash('dummy-password-for-timing', { memoryCost: 65536, timeCost: 3, parallelism: 1 });
+/**
+ * Dummy hash to equalize timing on login with an unknown email (account-enumeration
+ * defence). Computed once and memoized: deriving it per request would double the
+ * argon2 work — 64 MB and ~100 ms extra on *every* login, including successful ones,
+ * which is a cheap way to hand an attacker a memory-exhaustion lever.
+ */
+let dummyHash: Promise<string> | null = null;
+export const DUMMY_HASH_PROMISE = (): Promise<string> => {
+  dummyHash ??= argonHash('dummy-password-for-timing', {
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 1,
+  });
+  return dummyHash;
+};

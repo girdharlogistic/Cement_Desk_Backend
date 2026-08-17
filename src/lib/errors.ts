@@ -25,6 +25,8 @@ export const errors = {
   forbidden: (message = 'Forbidden') => new AppError(403, 'FORBIDDEN', message),
   insufficientRole: () => new AppError(403, 'INSUFFICIENT_ROLE', 'Insufficient role for this operation'),
   notAFirmMember: () => new AppError(403, 'NOT_A_FIRM_MEMBER', 'Not a member of this firm'),
+  emailNotVerified: () =>
+    new AppError(403, 'EMAIL_NOT_VERIFIED', 'Confirm your email address to use Cement Desk'),
   notFound: (message = 'Not found') => new AppError(404, 'NOT_FOUND', message),
   revMismatch: (server?: unknown) => {
     const e = new AppError(409, 'REV_MISMATCH', 'The record was changed elsewhere');

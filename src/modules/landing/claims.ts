@@ -71,7 +71,9 @@ export async function listClaims(firmId: string, status?: string, companyId?: st
 export async function createClaim(firmId: string, userId: string, d: ClaimWrite): Promise<any> {
   validateClaim(d);
   const id = d.id ?? newId();
-  return tx(async (c) => {
+  // Read-back runs after commit: `fetchClaim` takes its own pooled connection,
+  // and nesting that inside the transaction deadlocks the pool under concurrency.
+  await tx(async (c) => {
     try {
       await insertClaim(c, firmId, id, d, userId);
     } catch (e) {
@@ -81,15 +83,23 @@ export async function createClaim(firmId: string, userId: string, d: ClaimWrite)
         'SELECT id, deleted_at FROM claims WHERE firm_id = ? AND (id = ? OR (scheme_id = ? AND period_from = ?))',
         [firmId, id, d.schemeId, d.periodFrom],
       );
-      const clash = (rows as any[])[0];
-      if (clash && clash.deleted_at === null) {
+      // Prefer a live clash if there is one, so a live row is never silently purged
+      // just because a tombstone happened to sort first.
+      const all = rows as any[];
+      const clash = all.find((r) => r.deleted_at === null) ?? all[0];
+      if (!clash) {
+        // Raced by a concurrent insert that has since gone; surface it as a conflict
+        // rather than dereferencing undefined.
+        throw errors.duplicateKey('A claim already exists for this scheme and period');
+      }
+      if (clash.deleted_at === null) {
         throw errors.duplicateKey('A claim already exists for this scheme and period');
       }
       await c.query('DELETE FROM claims WHERE firm_id = ? AND id = ?', [firmId, clash.id]);
       await insertClaim(c, firmId, id, d, userId);
     }
-    return (await fetchClaim(firmId, id))!;
   });
+  return (await fetchClaim(firmId, id))!;
 }
 
 async function insertClaim(c: PoolConnection, firmId: string, id: string, d: ClaimWrite, userId: string): Promise<void> {
@@ -124,7 +134,9 @@ export async function patchClaim(
   }
   const sets: string[] = [];
   const vals: unknown[] = [];
-  if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
+  // `status` is deliberately NOT set from the patch here — the auto-transition
+  // below already folds patch.status into the value that gets written, and
+  // assigning the column twice in one SET is a silent last-one-wins trap.
   if (patch.sentOn !== undefined) { sets.push('sent_on = ?'); vals.push(patch.sentOn); }
   if (patch.schemeName !== undefined) { sets.push('scheme_name = ?'); vals.push(patch.schemeName); }
 

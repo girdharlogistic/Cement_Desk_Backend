@@ -43,3 +43,14 @@ export async function sendMail(to: string, subject: string, body: string): Promi
   }
   await t.sendMail({ from: cfg.MAIL_FROM, to, subject, text: body });
 }
+
+/**
+ * Fire-and-forget send for paths where mail delivery must never fail the request
+ * (e.g. the verification mail on signup). An unawaited `sendMail` would surface
+ * an SMTP error as an unhandled rejection, which takes the process down.
+ */
+export function sendMailBestEffort(to: string, subject: string, body: string): void {
+  void sendMail(to, subject, body).catch((e: unknown) => {
+    console.error(`[mail] delivery failed to=${to} subject=${subject}: ${(e as Error)?.message ?? e}`);
+  });
+}

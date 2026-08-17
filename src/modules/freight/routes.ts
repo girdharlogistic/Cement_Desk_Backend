@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../../lib/validate';
-import { authenticate, firmAccess, requireRole, ifMatchRev } from '../../plugins/guards';
+import { authenticateVerified, firmAccess, requireRole, ifMatchRev } from '../../plugins/guards';
 import { errors } from '../../lib/errors';
 import { enforceLimit } from '../../lib/limiter';
 import * as svc from './service';
@@ -40,7 +40,7 @@ function toWrite(b: any): svc.FreightWrite {
 export function registerFreightRoutes(app: FastifyInstance): void {
   const base = '/firms/:firmId/freight-entries';
 
-  app.get(base, { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get(base, { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     const limit = Math.min(Math.max(Number(qy.limit) || 200, 1), 500);
     let cursor: { date: string; id: string } | undefined;
@@ -64,7 +64,7 @@ export function registerFreightRoutes(app: FastifyInstance): void {
     return { entries: rows, nextCursor };
   });
 
-  app.post(base, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post(base, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     enforceLimit(`push:dev:${req.userId}`, 600, 60_000);
     const body = parse(entrySchema, req.body);
     const key = req.headers['idempotency-key'] as string | undefined;
@@ -76,7 +76,7 @@ export function registerFreightRoutes(app: FastifyInstance): void {
     return out.body;
   });
 
-  app.get(`${base}/summary`, { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get(`${base}/summary`, { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     return svc.summary(
       req.firmId,
@@ -86,19 +86,19 @@ export function registerFreightRoutes(app: FastifyInstance): void {
     );
   });
 
-  app.get(`${base}/:id`, { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get(`${base}/:id`, { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const entry = await svc.fetchEntry(req.firmId, (req.params as any).id);
     if (!entry || entry.deletedAt) throw errors.notFound('Entry not found');
     return { entry };
   });
 
-  app.patch(`${base}/:id`, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.patch(`${base}/:id`, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = parse(entryPatchSchema, req.body);
     const entry = await svc.patchEntry(req.firmId, req.userId, (req.params as any).id, toWriteLoose(body), ifMatchRev(req));
     return { entry };
   });
 
-  app.delete(`${base}/:id`, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.delete(`${base}/:id`, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     await svc.deleteEntry(req.firmId, req.userId, (req.params as any).id);
     reply.code(204);
   });

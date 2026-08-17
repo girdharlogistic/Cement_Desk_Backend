@@ -13,6 +13,8 @@ declare module 'fastify' {
     userId: string;
     /** Current session id (sid claim). */
     sessionId: string;
+    /** Whether the account has confirmed its email (set by `authenticate`). */
+    emailVerified: boolean;
     /** Firm from the route params (set by `firmAccess` preHandler). */
     firmId: string;
     /** Resolved membership role for `firmId` (set by `firmAccess`). */

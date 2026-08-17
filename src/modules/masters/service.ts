@@ -47,7 +47,12 @@ export async function createRow(
     return { row: (await getRow(table, firmId, id))!, created: true };
   } catch (e) {
     if (!isDuplicateKey(e)) throw e;
-    // Existing id → idempotent update / resurrect.
+    // The clash is only an idempotent re-insert when it is *this id* that already
+    // exists. A natural-key clash (e.g. party_routes' UNIQUE(firm_id, party_id,
+    // location_id) under a different id) must stay a duplicate-key error so the
+    // caller can resolve it on its own key — otherwise the update below targets a
+    // row that was never created and reports a spurious 404.
+    if (!(await getRow(table, firmId, id))) throw e;
     await updateRow(table, firmId, id, fields, userId, null, true);
     return { row: (await getRow(table, firmId, id))!, created: false };
   }

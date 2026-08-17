@@ -2,11 +2,12 @@ import { PoolConnection } from 'mysql2/promise';
 import { q, qOne, tx } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { hashPassword, verifyPassword, DUMMY_HASH_PROMISE } from '../../lib/passwords';
-import { generateAuthToken, generateRefreshToken, sha256Hex, signAccessToken } from '../../lib/tokens';
+import { generateRefreshToken, sha256Hex, signAccessToken } from '../../lib/tokens';
 import { addSecondsSql, nowSql, sqlToIso } from '../../lib/dates';
 import { newId } from '../../lib/ids';
 import { getConfig } from '../../config';
-import { sendMail } from '../../lib/mailer';
+import { sendMail, sendMailBestEffort } from '../../lib/mailer';
+import { generateOtp, otpMatches, OTP_MAX_ATTEMPTS, OTP_TTL_SECONDS } from '../../lib/otp';
 import { Role } from '../../types';
 
 export interface SessionInfo {
@@ -67,38 +68,98 @@ async function createSession(
   };
 }
 
-async function issueAuthToken(
+/**
+ * Issues a 6-digit code, superseding any code of the same purpose the user is
+ * already holding.
+ *
+ * Superseding is not tidiness: without it a resend would leave the previous
+ * code live, and every resend would widen the set of digits that open the
+ * account instead of replacing it.
+ */
+async function issueOtp(
   c: PoolConnection,
-  purpose: 'verify_email' | 'reset_password' | 'firm_invite',
-  ttlSeconds: number,
-  userId: string | null,
-  emailNorm: string | null,
-  payload: unknown,
-): Promise<{ id: string; rawToken: string }> {
-  const id = newId();
-  const t = generateAuthToken();
+  purpose: 'verify_email' | 'reset_password',
+  userId: string,
+  emailNorm: string,
+): Promise<string> {
   await c.query(
-    `INSERT INTO auth_tokens (id, user_id, email_norm, purpose, token_hash, payload, expires_at)
-     VALUES (?,?,?,?,?,CAST(? AS JSON),?)`,
-    [id, userId, emailNorm, purpose, t.hash, JSON.stringify(payload ?? null), addSecondsSql(new Date(), ttlSeconds)],
+    `UPDATE auth_tokens SET used_at = UTC_TIMESTAMP(3)
+      WHERE user_id = ? AND purpose = ? AND used_at IS NULL`,
+    [userId, purpose],
   );
-  return { id, rawToken: t.token };
+  const otp = generateOtp();
+  await c.query(
+    `INSERT INTO auth_tokens (id, user_id, email_norm, purpose, token_hash, salt, payload, expires_at)
+     VALUES (?,?,?,?,?,?,CAST(? AS JSON),?)`,
+    [
+      newId(),
+      userId,
+      emailNorm,
+      purpose,
+      otp.hash,
+      otp.salt,
+      JSON.stringify(null),
+      addSecondsSql(new Date(), OTP_TTL_SECONDS),
+    ],
+  );
+  return otp.code;
 }
 
-async function consumeAuthToken(rawToken: string, purpose: string) {
-  const hash = sha256Hex(rawToken);
-  return tx(async (c) => {
+/**
+ * Checks a code and burns it on success. Wrong guesses are counted on the row
+ * itself, so the limit survives a restart and cannot be reset by reconnecting.
+ *
+ * Every failure says the same thing. Distinguishing "no code pending" from
+ * "wrong code" would confirm to a stranger that an account exists and has a
+ * verification in flight.
+ */
+async function consumeOtp(
+  purpose: 'verify_email' | 'reset_password',
+  userId: string,
+  code: string,
+): Promise<void> {
+  const bad = () => errors.validation('That code is not valid. Check it, or ask for a new one.');
+  await tx(async (c) => {
     const [rows] = await c.query(
-      'SELECT * FROM auth_tokens WHERE token_hash = ? AND purpose = ? FOR UPDATE',
-      [hash, purpose],
+      `SELECT * FROM auth_tokens
+        WHERE user_id = ? AND purpose = ? AND used_at IS NULL
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [userId, purpose],
     );
     const tok = (rows as any[])[0];
-    if (!tok) throw errors.validation('Invalid or unknown token');
-    if (tok.used_at) throw errors.validation('Token already used');
-    if (tok.expires_at <= nowSql()) throw errors.validation('Token expired');
+    if (!tok || !tok.salt) throw bad();
+    if (tok.expires_at <= nowSql()) {
+      await c.query('UPDATE auth_tokens SET used_at = UTC_TIMESTAMP(3) WHERE id = ?', [tok.id]);
+      throw errors.validation('That code has expired. Ask for a new one.');
+    }
+    // Count the attempt before judging it, so a client that hangs up on a
+    // wrong answer still pays for the guess.
+    const attempts = Number(tok.attempts ?? 0) + 1;
+    if (attempts >= OTP_MAX_ATTEMPTS) {
+      await c.query('UPDATE auth_tokens SET attempts = ?, used_at = UTC_TIMESTAMP(3) WHERE id = ?', [
+        attempts,
+        tok.id,
+      ]);
+      if (!otpMatches(code, tok.salt, tok.token_hash)) {
+        throw errors.validation('Too many wrong codes. Ask for a new one.');
+      }
+      return; // Correct on the final allowed attempt — accept it.
+    }
+    await c.query('UPDATE auth_tokens SET attempts = ? WHERE id = ?', [attempts, tok.id]);
+    if (!otpMatches(code, tok.salt, tok.token_hash)) throw bad();
     await c.query('UPDATE auth_tokens SET used_at = UTC_TIMESTAMP(3) WHERE id = ?', [tok.id]);
-    return tok;
   });
+}
+
+function otpMail(code: string): { subject: string; body: string } {
+  return {
+    subject: `${code} is your Cement Desk code`,
+    body:
+      `Your Cement Desk verification code is:\n\n    ${code}\n\n` +
+      `It expires in ${OTP_TTL_SECONDS / 60} minutes and can be used once.\n\n` +
+      `If you did not ask for this, you can ignore this email — nobody can ` +
+      `get into your account with the code alone.`,
+  };
 }
 
 export async function signup(
@@ -138,8 +199,9 @@ export async function signup(
       await c.query('INSERT INTO firm_counters (firm_id, freight_serial) VALUES (?, 0)', [firmId]);
       firmWire = { id: firmId, name: firmName, fyStartMonth: fy, role: 'owner' };
     }
-    const verifyTok = await issueAuthToken(c, 'verify_email', 24 * 3600, userId, emailNorm, null);
-    void sendMail(email, 'Verify your Cement Desk email', `Verification token: ${verifyTok.rawToken}`);
+    const code = await issueOtp(c, 'verify_email', userId, emailNorm);
+    const mail = otpMail(code);
+    sendMailBestEffort(email, mail.subject, mail.body);
     return firmWire;
   });
 
@@ -274,24 +336,47 @@ export async function forgotPassword(email: string): Promise<void> {
   const emailNorm = normalizeEmail(email);
   const user = await qOne<any>('SELECT id, email FROM users WHERE email_norm = ? AND status = \'active\'', [emailNorm]);
   if (!user) return;
-  const tok = await tx(async (c) => issueAuthToken(c, 'reset_password', 3600, user.id, emailNorm, null));
-  await sendMail(user.email, 'Reset your Cement Desk password', `Reset token: ${tok.rawToken}`);
+  const code = await tx(async (c) => issueOtp(c, 'reset_password', user.id, emailNorm));
+  const mail = otpMail(code);
+  await sendMail(user.email, mail.subject, mail.body);
 }
 
-export async function resetPassword(rawToken: string, newPassword: string): Promise<void> {
-  const tok = await consumeAuthToken(rawToken, 'reset_password');
+/**
+ * Reset takes the email as well as the code: the caller is not signed in, so
+ * the address is what identifies whose code this is.
+ */
+export async function resetPassword(email: string, code: string, newPassword: string): Promise<void> {
+  const emailNorm = normalizeEmail(email);
+  const user = await qOne<any>('SELECT id FROM users WHERE email_norm = ? AND status = \'active\'', [emailNorm]);
+  // Same error an unknown code gives, so this cannot be used to enumerate
+  // which addresses have accounts.
+  if (!user) throw errors.validation('That code is not valid. Check it, or ask for a new one.');
+  await consumeOtp('reset_password', user.id, code);
   const hash = await hashPassword(newPassword);
   await tx(async (c) => {
-    await c.query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, tok.user_id]);
+    await c.query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, user.id]);
     await c.query('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [
-      tok.user_id,
+      user.id,
     ]);
   });
 }
 
-export async function verifyEmail(rawToken: string): Promise<void> {
-  const tok = await consumeAuthToken(rawToken, 'verify_email');
-  await q('UPDATE users SET email_verified = 1 WHERE id = ?', [tok.user_id]);
+/** Verification is done from inside the app, so the session identifies the user. */
+export async function verifyEmail(userId: string, code: string): Promise<UserWire> {
+  await consumeOtp('verify_email', userId, code);
+  await q('UPDATE users SET email_verified = 1 WHERE id = ?', [userId]);
+  const user = await qOne<any>('SELECT * FROM users WHERE id = ?', [userId]);
+  return mapUser(user);
+}
+
+/** Sends a fresh verification code, replacing whatever is outstanding. */
+export async function resendVerification(userId: string): Promise<void> {
+  const user = await qOne<any>('SELECT id, email, email_norm, email_verified FROM users WHERE id = ?', [userId]);
+  if (!user) throw errors.notFound('User not found');
+  if (user.email_verified) return; // Nothing to do — do not send a pointless mail.
+  const code = await tx(async (c) => issueOtp(c, 'verify_email', user.id, user.email_norm));
+  const mail = otpMail(code);
+  await sendMail(user.email, mail.subject, mail.body);
 }
 
 export async function listSessions(userId: string, currentSid: string) {

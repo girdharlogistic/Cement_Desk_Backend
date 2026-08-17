@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../../lib/validate';
-import { authenticate, firmAccess, requireRole, ifMatchRev, syncMeta } from '../../plugins/guards';
+import { authenticateVerified, firmAccess, requireRole, ifMatchRev, syncMeta } from '../../plugins/guards';
 import { tx } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { num } from '../../lib/num';
@@ -168,13 +168,13 @@ export function registerMasterRoutes(app: FastifyInstance): void {
   for (const def of MASTER_DEFS) {
     const base = `/firms/:firmId/${def.apiName}`;
 
-    app.get(base, { preHandler: [authenticate, firmAccess] }, async (req) => {
+    app.get(base, { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
       const includeDeleted = (req.query as any).includeDeleted === 'true';
       const rows = await svc.listRows(def.table, req.firmId, includeDeleted, def.orderBy);
       return rows.map(def.mapRow);
     });
 
-    app.post(base, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+    app.post(base, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
       const body = parse(def.createSchema, req.body);
       const key = req.headers['idempotency-key'] as string | undefined;
       const out = await withIdempotency(req.userId, `POST ${def.apiName} ${req.firmId}`, key, async () => {
@@ -185,7 +185,7 @@ export function registerMasterRoutes(app: FastifyInstance): void {
       return out.body;
     });
 
-    app.patch(`${base}/:id`, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+    app.patch(`${base}/:id`, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
       const body = parse(def.patchSchema, req.body);
       const row = await svc.updateRow(
         def.table,
@@ -198,12 +198,12 @@ export function registerMasterRoutes(app: FastifyInstance): void {
       return { [sing(def.apiName)]: def.mapRow(row) };
     });
 
-    app.delete(`${base}/:id`, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+    app.delete(`${base}/:id`, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
       await tx((c) => svc.deleteWithCascade(c, def.table, req.firmId, (req.params as any).id, req.userId));
       reply.code(204);
     });
 
-    app.post(`${base}/reorder`, { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+    app.post(`${base}/reorder`, { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
       const body = parse(reorderSchema, req.body);
       await svc.reorderRows(def.table, req.firmId, body.ids, req.userId);
       reply.code(204);
@@ -211,7 +211,7 @@ export function registerMasterRoutes(app: FastifyInstance): void {
   }
 
   // ---- party routes (prefill defaults only, §3.4) — natural-key upsert ----
-  app.get('/firms/:firmId/routes', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/routes', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const includeDeleted = (req.query as any).includeDeleted === 'true';
     const rows = await svc.listRows(
       'party_routes',
@@ -222,7 +222,7 @@ export function registerMasterRoutes(app: FastifyInstance): void {
     return rows.map(mapRoute);
   });
 
-  app.put('/firms/:firmId/routes', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.put('/firms/:firmId/routes', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = parse(routeUpsertSchema, req.body);
     const fields = {
       party_id: body.partyId,
@@ -254,7 +254,7 @@ export function registerMasterRoutes(app: FastifyInstance): void {
 
   app.delete(
     '/firms/:firmId/routes/:partyId/:locationId',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req, reply) => {
       const { partyId, locationId } = req.params as any;
       if (!isUuid(partyId) || !isUuid(locationId)) throw errors.validation('Invalid route key');

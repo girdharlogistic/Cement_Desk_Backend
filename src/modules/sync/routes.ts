@@ -1,13 +1,14 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../../lib/validate';
-import { authenticate, firmAccess, requireRole } from '../../plugins/guards';
+import { authenticateVerified, firmAccess, requireRole } from '../../plugins/guards';
 import { enforceLimit } from '../../lib/limiter';
 import { qOne } from '../../db/pool';
 import { sqlToIso } from '../../lib/dates';
 import { withIdempotency } from '../freight/service';
 import { pull } from './pull';
 import { push, Mutation, PushOutcome } from './push';
+import { counts } from './counts';
 
 const pullQuerySchema = z.object({
   cursor: z.string().max(64).optional(),
@@ -32,14 +33,20 @@ const pushSchema = z.object({
 });
 
 export function registerSyncRoutes(app: FastifyInstance): void {
-  app.get('/firms/:firmId/sync/pull', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/sync/pull', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = parse(pullQuerySchema, req.query ?? {});
     return pull(req.firmId, req.userId, qy.cursor, qy.limit, qy.deviceId);
   });
 
+  // Read-only, and read by a device that has nothing yet — a restoring client
+  // calls this once per firm to turn its download into a real progress bar.
+  app.get('/firms/:firmId/sync/counts', { preHandler: [authenticateVerified, firmAccess] }, async (req) =>
+    counts(req.firmId),
+  );
+
   app.post(
     '/firms/:firmId/sync/push',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req) => {
       const body = parse(pushSchema, req.body);
       enforceLimit(`syncpush:dev:${body.deviceId || req.userId}`, 60, 60_000);

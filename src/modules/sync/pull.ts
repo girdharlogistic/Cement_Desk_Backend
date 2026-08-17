@@ -45,15 +45,29 @@ export async function pull(
   const changes: Record<string, unknown[] | null> = {};
   let hasMore = false;
   let maxReturned: string | null = null;
+  // Each table paginates independently, so a table truncated at `limit` may stop
+  // at an earlier instant than another table's last row. Advancing the cursor to
+  // the global max would skip the truncated table's remaining rows forever, so the
+  // cursor is capped at the earliest truncation point. Rows past that cap are
+  // simply re-sent on the next page — upserts are idempotent on the client.
+  const truncated: { floor: string | null } = { floor: null };
 
-  async function page(table: string): Promise<any[]> {
+  /**
+   * `tieBreak` keeps the ordering total when several rows share an updated_at.
+   * It is a column name, never user input. `opening_baselines` is keyed on
+   * firm_id alone and has no `id` column at all — ordering it by `id` made every
+   * single pull fail with ER_BAD_FIELD_ERROR.
+   */
+  async function page(table: string, tieBreak = 'id'): Promise<any[]> {
     const rows = await q<any>(
-      `SELECT * FROM ${table} WHERE firm_id = ? AND updated_at > ? AND updated_at <= ? ORDER BY updated_at ASC, id ASC LIMIT ?`,
+      `SELECT * FROM ${table} WHERE firm_id = ? AND updated_at > ? AND updated_at <= ? ORDER BY updated_at ASC, ${tieBreak} ASC LIMIT ?`,
       [firmId, cursorSql, upper, limit + 1],
     );
     if (rows.length > limit) {
       hasMore = true;
       rows.length = limit;
+      const lastKept = rows[rows.length - 1].updated_at as string;
+      if (truncated.floor === null || lastKept < truncated.floor) truncated.floor = lastKept;
     }
     for (const r of rows) if (!maxReturned || r.updated_at > maxReturned) maxReturned = r.updated_at;
     return rows;
@@ -73,7 +87,7 @@ export async function pull(
   changes.freightEntries = fe.map((r) => mapFreightEntry(r, feGrades[r.id] ?? {}));
 
   // baseline: at most one row per firm
-  const bl = await page('opening_baselines');
+  const bl = await page('opening_baselines', 'firm_id');
   if (bl.length === 0) {
     changes.baseline = null;
   } else {
@@ -135,7 +149,15 @@ export async function pull(
   }
   changes.claims = cl.map((r) => mapClaim(r, notes));
 
-  const nextCursorSql = maxReturned ?? upper;
+  // Cap at the earliest truncation point (see `page`). The cap must still make
+  // forward progress: if a single table has more than `limit` rows sharing one
+  // millisecond, the floor collapses onto the incoming cursor and the client
+  // would re-request the same page forever — fall back to the max returned then,
+  // which is the best a millisecond-granular cursor can do.
+  let nextCursorSql = maxReturned ?? upper;
+  if (truncated.floor !== null && truncated.floor > cursorSql && truncated.floor < nextCursorSql) {
+    nextCursorSql = truncated.floor;
+  }
   const result: PullResult = {
     serverTime: sqlToIso(upper)!,
     nextCursor: sqlToIso(nextCursorSql)!,

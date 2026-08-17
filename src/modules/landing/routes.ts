@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../../lib/validate';
-import { authenticate, firmAccess, requireRole, ifMatchRev } from '../../plugins/guards';
+import { authenticateVerified, firmAccess, requireRole, ifMatchRev } from '../../plugins/guards';
 import { errors } from '../../lib/errors';
 import { businessDateOr400, withIdempotency } from '../freight/service';
 import * as purchases from './purchases';
@@ -86,7 +86,7 @@ function normSchemeDates<T extends { windowFrom?: string | null; windowTo?: stri
 
 export function registerLandingRoutes(app: FastifyInstance): void {
   // ---- purchases ----
-  app.get('/firms/:firmId/purchases', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/purchases', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     const limit = Math.min(Math.max(Number(qy.limit) || 200, 1), 500);
     let cursor: { date: string; id: string } | undefined;
@@ -109,7 +109,7 @@ export function registerLandingRoutes(app: FastifyInstance): void {
     return { purchases: rows, nextCursor };
   });
 
-  app.post('/firms/:firmId/purchases', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/purchases', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = parse(purchaseSchema, req.body);
     const key = req.headers['idempotency-key'] as string | undefined;
     const out = await withIdempotency(req.userId, 'POST purchases', key, async () => {
@@ -122,18 +122,18 @@ export function registerLandingRoutes(app: FastifyInstance): void {
     return out.body;
   });
 
-  app.patch('/firms/:firmId/purchases/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.patch('/firms/:firmId/purchases/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = normDates(parse(purchasePatchSchema, req.body));
     const purchase = await purchases.patchPurchase(req.firmId, req.userId, (req.params as any).id, body, ifMatchRev(req));
     return { purchase };
   });
 
-  app.delete('/firms/:firmId/purchases/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.delete('/firms/:firmId/purchases/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     await purchases.deletePurchase(req.firmId, req.userId, (req.params as any).id);
     reply.code(204);
   });
 
-  app.post('/firms/:firmId/purchases/:id/payments', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/purchases/:id/payments', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = normDates(parse(paymentSchema, req.body));
     const purchase = await purchases.addPayment(req.firmId, req.userId, (req.params as any).id, body);
     reply.code(201);
@@ -142,7 +142,7 @@ export function registerLandingRoutes(app: FastifyInstance): void {
 
   app.delete(
     '/firms/:firmId/purchases/:id/payments/:paymentId',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req) => {
       const purchase = await purchases.deletePayment(req.firmId, req.userId, (req.params as any).id, (req.params as any).paymentId);
       return { purchase };
@@ -150,42 +150,42 @@ export function registerLandingRoutes(app: FastifyInstance): void {
   );
 
   // ---- schemes ----
-  app.get('/firms/:firmId/schemes', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/schemes', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     const active = qy.active === 'true' ? true : qy.active === 'false' ? false : undefined;
     return { schemes: await schemes.listSchemes(req.firmId, qy.companyId, active) };
   });
 
-  app.post('/firms/:firmId/schemes', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/schemes', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = normSchemeDates(parse(schemeSchema, req.body));
     const scheme = await schemes.createScheme(req.firmId, req.userId, body as schemes.SchemeWrite);
     reply.code(201);
     return { scheme };
   });
 
-  app.patch('/firms/:firmId/schemes/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.patch('/firms/:firmId/schemes/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = normSchemeDates(parse(schemePatchSchema, req.body));
     const scheme = await schemes.patchScheme(req.firmId, req.userId, (req.params as any).id, body, ifMatchRev(req));
     return { scheme };
   });
 
-  app.post('/firms/:firmId/schemes/:id/activate', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.post('/firms/:firmId/schemes/:id/activate', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = parse(activateSchema, req.body);
     return { scheme: await schemes.setActive(req.firmId, req.userId, (req.params as any).id, body.active) };
   });
 
-  app.delete('/firms/:firmId/schemes/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.delete('/firms/:firmId/schemes/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     await schemes.deleteScheme(req.firmId, req.userId, (req.params as any).id);
     reply.code(204);
   });
 
   // ---- claims ----
-  app.get('/firms/:firmId/claims', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/claims', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     return { claims: await claims.listClaims(req.firmId, qy.status, qy.companyId) };
   });
 
-  app.post('/firms/:firmId/claims', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/claims', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = parse(claimSchema, req.body);
     body.periodFrom = businessDateOr400(body.periodFrom, 'periodFrom');
     body.periodTo = businessDateOr400(body.periodTo, 'periodTo');
@@ -198,7 +198,7 @@ export function registerLandingRoutes(app: FastifyInstance): void {
     return out.body;
   });
 
-  app.patch('/firms/:firmId/claims/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req) => {
+  app.patch('/firms/:firmId/claims/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const raw: any = parse(claimPatchSchema, req.body);
     if (raw.periodFrom != null) raw.periodFrom = businessDateOr400(raw.periodFrom, 'periodFrom');
     if (raw.periodTo != null) raw.periodTo = businessDateOr400(raw.periodTo, 'periodTo');
@@ -207,12 +207,12 @@ export function registerLandingRoutes(app: FastifyInstance): void {
     return { claim };
   });
 
-  app.delete('/firms/:firmId/claims/:id', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.delete('/firms/:firmId/claims/:id', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     await claims.deleteClaim(req.firmId, req.userId, (req.params as any).id);
     reply.code(204);
   });
 
-  app.post('/firms/:firmId/claims/:id/credit-notes', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/claims/:id/credit-notes', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = normDates(parse(creditNoteSchema, req.body));
     const claim = await claims.addCreditNote(req.firmId, req.userId, (req.params as any).id, body);
     reply.code(201);
@@ -221,7 +221,7 @@ export function registerLandingRoutes(app: FastifyInstance): void {
 
   app.delete(
     '/firms/:firmId/claims/:id/credit-notes/:cnId',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req) => {
       const claim = await claims.deleteCreditNote(req.firmId, req.userId, (req.params as any).id, (req.params as any).cnId);
       return { claim };

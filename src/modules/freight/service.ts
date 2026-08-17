@@ -107,17 +107,36 @@ export async function createEntry(firmId: string, userId: string, data: FreightW
   validateFreightEntry(data);
   const id = data.id ?? newId();
   await checkRefs(firmId, data);
-  return tx(async (c) => {
+  // NOTE: the read-back deliberately happens *after* the transaction commits.
+  // `fetchEntry` goes through the pool, and asking the pool for a second
+  // connection while this one is still held deadlocks the pool as soon as there
+  // are `connectionLimit` concurrent writers.
+  await tx(async (c) => {
     const existing = await fetchEntryOn(c, firmId, id);
     if (existing && existing.deleted_at === null) {
-      // Client id reuse: idempotent insert (§1.2) — return the existing row.
-      return fetchEntry(firmId, id);
+      // Client id reuse: idempotent insert (§1.2) — leave the existing row alone.
+      return;
+    }
+    if (existing) {
+      // Tombstoned id: resurrect in place. Re-inserting would collide on the PK,
+      // and the original serial is kept because serials are never reused (§5.1).
+      await c.query(
+        `UPDATE freight_entries SET date=?, party_id=?, location_id=?, vehicle_no=?, revenue_per_bag=?, bags=?,
+           total_reimbursed=?, basis=?, cost_rate=?, cost_units=?, other_expenses=?, other_note=?, total_cost=?,
+           profit=?, deleted_at = NULL, rev = rev + 1, updated_by = ?
+         WHERE firm_id = ? AND id = ?`,
+        [data.date, data.partyId, data.locationId, data.vehicleNo, data.revenuePerBag, data.bags,
+         data.totalReimbursed, data.basis, data.costRate, data.costUnits, data.otherExpenses, data.otherNote,
+         data.totalCost, data.profit, userId, firmId, id],
+      );
+      await writeGradeBags(c, firmId, id, data.gradeBags ?? {});
+      return;
     }
     const serial = await allocateSerial(c, firmId);
     await insertEntryRow(c, firmId, id, serial, data, userId);
     await writeGradeBags(c, firmId, id, data.gradeBags ?? {});
-    return fetchEntry(firmId, id);
   });
+  return (await fetchEntry(firmId, id))!;
 }
 
 async function fetchEntryOn(c: PoolConnection, firmId: string, id: string): Promise<any | null> {
@@ -317,7 +336,9 @@ export async function summary(firmId: string, from?: string, to?: string, partyI
     profitPerBag: num(r.b) > 0 ? num(r.p) / num(r.b) : 0,
   });
   return {
-    ...pack(tot[0]),
+    // `tot` is already the first row — `q` returns rows, and the destructuring
+    // above unwrapped it. Indexing it again yields undefined and 500s the route.
+    ...pack(tot),
     byLocation: byLoc.map((l) => ({ locationId: l.location_id, locationName: nameOf.get(l.location_id) ?? null, ...pack(l) })),
   };
 }

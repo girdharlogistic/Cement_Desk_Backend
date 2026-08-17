@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../../lib/validate';
-import { authenticate, firmAccess, requireRole } from '../../plugins/guards';
+import { authenticateVerified, firmAccess, requireRole } from '../../plugins/guards';
 import { businessDateOr400, withIdempotency } from '../freight/service';
 import * as svc from './service';
 
@@ -29,18 +29,18 @@ const receiptSchema = z.object({
 
 export function registerStockRoutes(app: FastifyInstance): void {
   // ---- baseline (§3.7, §5.2) ----
-  app.get('/firms/:firmId/baseline', { preHandler: [authenticate, firmAccess] }, async (req) =>
+  app.get('/firms/:firmId/baseline', { preHandler: [authenticateVerified, firmAccess] }, async (req) =>
     svc.getBaseline(req.firmId),
   );
 
-  app.put('/firms/:firmId/baseline', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.put('/firms/:firmId/baseline', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req) => {
     const body = parse(baselineSchema, req.body);
     body.date = businessDateOr400(body.date, 'date');
     return svc.putBaseline(req.firmId, req.userId, body as svc.BaselineInput);
   });
 
   // ---- stock days ----
-  app.get('/firms/:firmId/stock-days', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/stock-days', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = req.query as any;
     const days = await svc.listStockDays(
       req.firmId,
@@ -50,7 +50,7 @@ export function registerStockRoutes(app: FastifyInstance): void {
     return { days };
   });
 
-  app.post('/firms/:firmId/stock-days', { preHandler: [authenticate, firmAccess, requireRole('member')] }, async (req, reply) => {
+  app.post('/firms/:firmId/stock-days', { preHandler: [authenticateVerified, firmAccess, requireRole('member')] }, async (req, reply) => {
     const body = parse(createDaySchema, req.body);
     const date = businessDateOr400(body.date, 'date');
     const key = req.headers['idempotency-key'] as string | undefined;
@@ -63,14 +63,14 @@ export function registerStockRoutes(app: FastifyInstance): void {
     return out.body;
   });
 
-  app.get('/firms/:firmId/stock-days/:date', { preHandler: [authenticate, firmAccess] }, async (req) => {
+  app.get('/firms/:firmId/stock-days/:date', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const date = businessDateOr400((req.params as any).date, 'date');
     return { day: await svc.getStockDay(req.firmId, date) };
   });
 
   app.put(
     '/firms/:firmId/stock-days/:date/cells',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req) => {
       const date = businessDateOr400((req.params as any).date, 'date');
       const body = parse(cellSchema, req.body);
@@ -80,7 +80,7 @@ export function registerStockRoutes(app: FastifyInstance): void {
 
   app.post(
     '/firms/:firmId/stock-days/:date/receipts',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req, reply) => {
       const date = businessDateOr400((req.params as any).date, 'date');
       const body = parse(receiptSchema, req.body);
@@ -92,7 +92,7 @@ export function registerStockRoutes(app: FastifyInstance): void {
 
   app.delete(
     '/firms/:firmId/stock-days/:date/receipts/:receiptId',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req) => {
       const date = businessDateOr400((req.params as any).date, 'date');
       return { day: await svc.deleteReceipt(req.firmId, req.userId, date, (req.params as any).receiptId) };
@@ -101,7 +101,7 @@ export function registerStockRoutes(app: FastifyInstance): void {
 
   app.delete(
     '/firms/:firmId/stock-days/:date',
-    { preHandler: [authenticate, firmAccess, requireRole('member')] },
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
     async (req, reply) => {
       const date = businessDateOr400((req.params as any).date, 'date');
       await svc.deleteStockDay(req.firmId, req.userId, date);
