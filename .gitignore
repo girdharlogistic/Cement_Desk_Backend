@@ -1,5 +1,10 @@
 node_modules/
 dist/
-.env
+# Every .env variant, not just `.env` — a plain `.env` rule left backup copies
+# like `.env.bak.1786709454` (a verbatim copy, TiDB and mail credentials and
+# all) one `git add .` away from a public repo. The example file carries no
+# secrets and stays tracked.
+.env*
+!.env.example
 *.log
 coverage/
