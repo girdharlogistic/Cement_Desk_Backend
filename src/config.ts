@@ -35,6 +35,26 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
 
+  // ---- notification console (/console) ----
+  // A login of its own, deliberately unrelated to any app account: this page
+  // can push a notification to every install, and no firm role should ever
+  // imply that. Leave CONSOLE_PASSWORD_HASH empty and the console is off.
+  CONSOLE_EMAIL: z.string().default(''),
+  /** argon2 hash. The password itself is never stored anywhere. */
+  CONSOLE_PASSWORD_HASH: z.string().default(''),
+  CONSOLE_SESSION_TTL_SECONDS: z.coerce.number().int().default(8 * 3600),
+  /** Service-account JSON with permission to send to the Firebase project. */
+  FCM_KEY_PATH: z.string().default(''),
+  FCM_TOPIC: z.string().default('all'),
+  /** Where uploaded notification images are written — outside the repo. */
+  CONSOLE_MEDIA_DIR: z.string().default(''),
+  /**
+   * Origin images are served from. Google's servers fetch the image, not the
+   * phone, so this has to be the public URL: a localhost one yields a
+   * notification whose picture is silently missing.
+   */
+  PUBLIC_BASE_URL: z.string().default(''),
+
   SMTP_URL: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().optional(),

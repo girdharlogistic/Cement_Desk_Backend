@@ -10,6 +10,7 @@ import { registerStockRoutes } from './modules/stock/routes';
 import { registerLandingRoutes } from './modules/landing/routes';
 import { registerSyncRoutes } from './modules/sync/routes';
 import { registerBackupRoutes } from './modules/backup/routes';
+import { registerConsoleRoutes } from './modules/console/routes';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -78,6 +79,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (!db) return reply.code(503).send({ ok: false, db: 'down', requestId: req.id });
     return { ok: true, db: 'up' };
   });
+
+  // Outside the /api/v1 prefix on purpose: /console is a web page and /media
+  // serves the images Google fetches for a notification, neither of which is
+  // part of the app's API surface.
+  registerConsoleRoutes(app);
 
   await app.register(
     async (api) => {
