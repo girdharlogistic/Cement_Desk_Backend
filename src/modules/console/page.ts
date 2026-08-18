@@ -103,7 +103,9 @@ f.addEventListener('submit', async (e) => {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error((j.error && j.error.message) || 'Sign-in failed');
-    location.href = '/console';
+    // replace(), not href: the login form has served its purpose, and leaving
+    // it in history means Back lands on a page that will only bounce forward.
+    location.replace('/console');
   } catch (err) {
     msg.className = 'msg err'; msg.textContent = err.message;
     go.disabled = false;

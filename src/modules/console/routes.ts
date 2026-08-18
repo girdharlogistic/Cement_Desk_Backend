@@ -46,13 +46,21 @@ function readCookie(req: FastifyRequest, name: string): string | null {
 function setCookie(reply: FastifyReply, value: string, maxAgeSeconds: number): void {
   // `Secure` unconditionally: the only way in is the public HTTPS tunnel, and
   // a cookie that can ride a plaintext hop is a session that can be lifted off
-  // the wire. `Strict` because nothing links here from anywhere else.
+  // the wire.
+  //
+  // `Lax` rather than `Strict`. Strict withholds the cookie on a range of
+  // top-level navigations — arriving from a bookmark manager, a redirect, some
+  // browsers' address-bar cases — which for a page you reach by *navigating to
+  // it* means being bounced back to the login form at random. It buys nothing
+  // here either: the only state-changing route is a POST carrying
+  // `content-type: application/json`, and Lax already withholds the cookie
+  // from cross-site POSTs, so the CSRF story is unchanged.
   const bits = [
     `${COOKIE}=${encodeURIComponent(value)}`,
     'Path=/',
     'HttpOnly',
     'Secure',
-    'SameSite=Strict',
+    'SameSite=Lax',
     `Max-Age=${maxAgeSeconds}`,
   ];
   void reply.header('set-cookie', bits.join('; '));
@@ -85,6 +93,12 @@ export function registerConsoleRoutes(app: FastifyInstance): void {
     reply
       .code(200)
       .header('content-type', 'text/html; charset=utf-8')
+      // Without this the browser is free to cache a 200 HTML response on its
+      // own guess at a lifetime — and it does. Signing in then landed back on
+      // a *cached copy of the login page*: the cookie was set, the redirect
+      // ran, and the request never reached the server. The same URL renders
+      // two different pages depending on a cookie, so it can never be stored.
+      .header('cache-control', 'no-store, must-revalidate')
       // The page carries its own script and loads nothing else; say so, so a
       // stray injection has nowhere to fetch from.
       .header(
