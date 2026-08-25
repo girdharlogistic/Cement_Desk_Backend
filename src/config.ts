@@ -35,6 +35,39 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
 
+  // ---- Google Play billing ----
+  // The service account is the same one the release workflow uses. It needs
+  // the "View financial data" permission in Play Console on top of releasing,
+  // or every purchase check comes back 401.
+  //
+  // A path rather than the JSON inline: the key is a multi-line PEM and .env
+  // is not the place for it. The file is mode 600 and matched by .gitignore's
+  // `*service-account*.json`.
+  PLAY_SA_KEY_FILE: z.string().default(''),
+  PLAY_PACKAGE_NAME: z.string().default('com.girdharlogistics.cementdesk'),
+  /** The one subscription product. Base plans `monthly` and `yearly` hang off it. */
+  PLAY_PRODUCT_ID: z.string().default('premium'),
+
+  /**
+   * Whether a missing entitlement actually *blocks* anything.
+   *
+   * False until a real purchase has been put through end to end. Flipping it
+   * on is what starts limiting free accounts to one writable firm and one
+   * device — do that before it is proven and the users who already have four
+   * firms are locked out by a bug rather than by a decision.
+   */
+  BILLING_ENFORCED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
+
+  /**
+   * Shared secret on the Pub/Sub push endpoint for Play's Real-time Developer
+   * Notifications. Empty disables the endpoint rather than leaving an
+   * unauthenticated route that can rewrite entitlements.
+   */
+  PLAY_RTDN_SECRET: z.string().default(''),
+
   // ---- notification console (/console) ----
   // A login of its own, deliberately unrelated to any app account: this page
   // can push a notification to every install, and no firm role should ever

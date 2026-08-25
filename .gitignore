@@ -8,3 +8,8 @@ dist/
 !.env.example
 *.log
 coverage/
+
+# Google service-account keys. Same reasoning as .env*: one `git add .` away
+# from publishing a credential that can push an app update to every user.
+*service-account*.json
+*-sa.json

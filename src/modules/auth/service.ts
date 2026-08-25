@@ -1,6 +1,7 @@
 import { PoolConnection } from 'mysql2/promise';
 import { q, qOne, tx } from '../../db/pool';
 import { errors } from '../../lib/errors';
+import { invalidateAllSessions, invalidateSession } from '../../lib/caches';
 import { hashPassword, verifyPassword, DUMMY_HASH_PROMISE } from '../../lib/passwords';
 import { generateRefreshToken, sha256Hex, signAccessToken } from '../../lib/tokens';
 import { addSecondsSql, nowSql, sqlToIso } from '../../lib/dates';
@@ -231,33 +232,67 @@ export async function login(
   return { user: mapUser(user), tokens };
 }
 
-export async function refresh(rawRefreshToken: string): Promise<{ tokens: Omit<SessionInfo, 'sessionId'>; userId: string }> {
-  const cfg = getConfig();
-  const hash = sha256Hex(rawRefreshToken);
-  const session = await qOne<any>('SELECT * FROM sessions WHERE refresh_token_hash = ?', [hash]);
-  if (!session) throw errors.unauthenticated('Unknown refresh token');
-  if (session.revoked_at) {
-    // Refresh-token reuse → possible theft: nuke every session of the user (§7.2).
-    await q('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [
-      session.user_id,
-    ]);
-    throw errors.tokenRevoked();
-  }
-  if (session.expires_at <= nowSql()) throw errors.tokenExpired();
+// A retried refresh call on a bad connection can arrive after the server
+// already rotated the token but before the client saw the response, so the
+// client comes back with a token that was only *just* superseded. Treating
+// that the same as real reuse (a token replayed days later) logged people out
+// mid-session on flaky mobile networks. Within this window it is resolved by
+// chasing the rotation chain instead (§7.2).
+const REFRESH_REUSE_GRACE_MS = 60_000;
 
+async function rotateSession(session: any): Promise<{ tokens: Omit<SessionInfo, 'sessionId'>; userId: string }> {
   const tokens = await tx(async (c) => {
-    // Rotate: revoke old row, create a new session sliding the expiry (§7.2).
-    await c.query('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE id = ?', [session.id]);
-    return createSession(
+    const next = await createSession(
       c,
       session.user_id,
       session.device_id,
       session.device_label ?? '',
       session.user_agent ?? '',
     );
+    await c.query('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3), replaced_by = ? WHERE id = ?', [
+      next.sessionId,
+      session.id,
+    ]);
+    return next;
   });
-  void cfg;
+  // The old session is dead the moment this commits; drop its cached copy so
+  // the next request with the old access token is refused, not served for the
+  // remainder of the cache window.
+  invalidateSession(session.id);
   return { tokens, userId: session.user_id };
+}
+
+export async function refresh(rawRefreshToken: string): Promise<{ tokens: Omit<SessionInfo, 'sessionId'>; userId: string }> {
+  const hash = sha256Hex(rawRefreshToken);
+  const session = await qOne<any>('SELECT * FROM sessions WHERE refresh_token_hash = ?', [hash]);
+  if (!session) throw errors.unauthenticated('Unknown refresh token');
+
+  if (session.revoked_at) {
+    let cur = session;
+    let hops = 0;
+    while (
+      cur.revoked_at &&
+      cur.replaced_by &&
+      Date.now() - new Date(cur.revoked_at).getTime() <= REFRESH_REUSE_GRACE_MS &&
+      hops++ < 5
+    ) {
+      const next = await qOne<any>('SELECT * FROM sessions WHERE id = ?', [cur.replaced_by]);
+      if (!next) break;
+      cur = next;
+    }
+    if (!cur.revoked_at && cur.expires_at > nowSql()) return rotateSession(cur);
+
+    // Outside the grace window, or the chain dead-ends: a dead token came
+    // back to life, which is what real theft looks like. Nuke every session.
+    await q('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [
+      session.user_id,
+    ]);
+    invalidateAllSessions();
+    throw errors.tokenRevoked();
+  }
+
+  if (session.expires_at <= nowSql()) throw errors.tokenExpired();
+  return rotateSession(session);
 }
 
 export async function logout(rawRefreshToken: string): Promise<void> {
@@ -265,10 +300,14 @@ export async function logout(rawRefreshToken: string): Promise<void> {
   await q('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE refresh_token_hash = ? AND revoked_at IS NULL', [
     hash,
   ]);
+  // Which session id that hash belonged to is not in hand here, and looking it
+  // up is a round trip to save clearing a map of a few dozen entries.
+  invalidateAllSessions();
 }
 
 export async function logoutAll(userId: string): Promise<void> {
   await q('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE user_id = ? AND revoked_at IS NULL', [userId]);
+  invalidateAllSessions();
 }
 
 export async function me(userId: string): Promise<{
@@ -329,6 +368,7 @@ export async function changePassword(userId: string, currentSessionId: string, c
       currentSessionId,
     ]);
   });
+  invalidateAllSessions();
 }
 
 export async function forgotPassword(email: string): Promise<void> {
@@ -359,12 +399,17 @@ export async function resetPassword(email: string, code: string, newPassword: st
       user.id,
     ]);
   });
+  invalidateAllSessions();
 }
 
 /** Verification is done from inside the app, so the session identifies the user. */
 export async function verifyEmail(userId: string, code: string): Promise<UserWire> {
   await consumeOtp('verify_email', userId, code);
   await q('UPDATE users SET email_verified = 1 WHERE id = ?', [userId]);
+  // `emailVerified` rides along in the cached session, so without this the
+  // user stays locked out of every verified-only route for the cache window —
+  // right after the one action that was supposed to let them in.
+  invalidateAllSessions();
   const user = await qOne<any>('SELECT * FROM users WHERE id = ?', [userId]);
   return mapUser(user);
 }
@@ -397,6 +442,7 @@ export async function listSessions(userId: string, currentSid: string) {
 
 export async function revokeSession(userId: string, sessionId: string): Promise<void> {
   await q('UPDATE sessions SET revoked_at = UTC_TIMESTAMP(3) WHERE id = ? AND user_id = ?', [sessionId, userId]);
+  invalidateSession(sessionId);
 }
 
 /** Allow-list check used by firmAccess-independent endpoints (token gift). */

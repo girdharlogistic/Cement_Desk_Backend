@@ -7,7 +7,7 @@ import { num } from '../../lib/num';
 import { validateFreightEntry, validatePurchase, validateClaim, validateScheme, FreightInput } from '../../lib/validators';
 import { MASTER_DEFS } from '../masters/routes';
 import { deleteWithCascade, softDeleteRow } from '../masters/service';
-import { mapFreightEntry } from '../freight/service';
+import { mapFreightEntry, compactSerialsAfterDelete } from '../freight/service';
 import { mapPurchase } from '../landing/purchases';
 import { mapClaim } from '../landing/claims';
 import { claimAutoStatus, sortSlabs } from '../../lib/validators';
@@ -294,7 +294,9 @@ async function freightDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   if (m.rev === undefined || m.rev !== Number(existing.rev)) {
     return conflict(m, 'REV_MISMATCH', mapFreightEntry(existing, (await gradeBagsForConn(ctx, [m.id]))[m.id] ?? {}));
   }
+  const serial = Number(existing.serial);
   await softDeleteRow(ctx.c, 'freight_entries', ctx.firmId, m.id, ctx.userId);
+  await compactSerialsAfterDelete(ctx.c, ctx.firmId, serial, ctx.userId);
   return applied(m, Number(existing.rev) + 1);
 }
 

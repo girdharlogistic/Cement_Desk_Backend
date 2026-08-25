@@ -9,6 +9,20 @@ import { mapPurchase, paymentsFor } from '../landing/purchases';
 import { mapScheme } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
 import { num } from '../../lib/num';
+import { firmWatermark } from '../../lib/caches';
+
+/**
+ * The shape of an empty delta. Same keys as a full pull, so the client's
+ * `applyChanges` walks exactly the same branches; `baseline` is null, which it
+ * already reads as "no baseline row in this page" rather than "deleted".
+ */
+function noChanges(): Record<string, unknown[] | null> {
+  return {
+    parties: [], locations: [], grades: [], routes: [], companies: [], sources: [],
+    freightEntries: [], baseline: null, stockDays: [], purchases: [], schemes: [],
+    claims: [],
+  };
+}
 
 export interface PullResult {
   serverTime: string;
@@ -25,10 +39,8 @@ export interface PullResult {
  */
 export async function pull(
   firmId: string,
-  userId: string,
   cursorIso: string | undefined,
   limit: number,
-  deviceId?: string,
 ): Promise<PullResult> {
   const cfg = getConfig();
   let cursorSql: string | null = null;
@@ -40,6 +52,30 @@ export async function pull(
   } else {
     cursorSql = '1970-01-01 00:00:00.000';
   }
+  // Fast path. `firms.data_updated_at` is bumped by the onResponse hook in
+  // app.ts for every successful write inside this firm, so a watermark at or
+  // behind the client's cursor means the twelve table scans below cannot
+  // return a single row. Answering from it costs one statement — or none, when
+  // the watermark is still warm in memory — instead of thirteen.
+  //
+  // Two deliberate choices make a lost bump survivable rather than fatal:
+  //
+  //   • a NULL watermark means "unknown" and takes the slow path;
+  //   • the cursor is returned **unadvanced**, so a change whose bump went
+  //     missing is delivered by the next bump that does land, from the same
+  //     cursor. A missed bump can delay a change. It cannot lose one.
+  if (cursorIso) {
+    const { marker, now } = await firmWatermark(firmId);
+    if (marker !== null && marker <= cursorSql) {
+      return {
+        serverTime: sqlToIso(now)!,
+        nextCursor: sqlToIso(cursorSql)!,
+        hasMore: false,
+        changes: noChanges(),
+      };
+    }
+  }
+
   const upper = ((await qOne<{ u: string }>('SELECT UTC_TIMESTAMP(3) AS u'))!).u;
 
   const changes: Record<string, unknown[] | null> = {};
@@ -165,12 +201,12 @@ export async function pull(
     changes,
   };
 
-  if (deviceId) {
-    await q(
-      `INSERT INTO sync_state (user_id, device_id, firm_id, \`cursor\`, last_sync_at) VALUES (?,?,?,?,UTC_TIMESTAMP(3))
-       ON DUPLICATE KEY UPDATE \`cursor\` = VALUES(\`cursor\`), last_sync_at = UTC_TIMESTAMP(3)`,
-      [userId, deviceId, firmId, nextCursorSql],
-    );
-  }
+  // The `sync_state` upsert that used to live here is gone. It wrote every
+  // device's cursor back to the server on every pull — 3 request units a time,
+  // roughly a third of what a pull cost — and nothing ever read it. The client
+  // owns its cursor: it sends it as `?cursor=` and stores `nextCursor` in Hive,
+  // so the server's copy was a duplicate that no route, job or console page
+  // consulted. If a support tool ever needs "where is device X", write it from
+  // here again, but sample it — not on every poll.
   return result;
 }

@@ -46,8 +46,15 @@ function dir(): string {
  * The one shape a stored name may take. Every read goes through this before it
  * touches the filesystem — the name arrives in a URL, and a check that lets
  * `../` through turns an image route into "read any file on the server".
+ *
+ * The optional `s-` marks a *pinned* file: a sponsor logo, which is referenced
+ * by a database row that will still be there in a year and so must survive
+ * [sweep]. Notification attachments carry no prefix and are still swept.
  */
-const NAME = /^[a-f0-9]{32}\.(png|jpg|webp)$/;
+const NAME = /^(s-)?[a-f0-9]{32}\.(png|jpg|webp)$/;
+
+/** Pinned files begin with this. Checked by [sweep], set by [storeDataUrl]. */
+const PIN = 's-';
 
 export interface StoredImage {
   name: string;
@@ -62,7 +69,17 @@ export interface StoredImage {
  * that is capped at four megabytes anyway, and saves adding a body-parser
  * plugin to the server for one form.
  */
-export function storeDataUrl(dataUrl: string): StoredImage {
+export function storeDataUrl(
+  dataUrl: string,
+  opts: {
+    /**
+     * Keep the file indefinitely. Set for a sponsor logo, whose URL is stored
+     * in `app_sponsor` and read by the app for as long as that sponsor runs —
+     * the 30-day sweep would otherwise leave a live card with a dead image.
+     */
+    pinned?: boolean;
+  } = {},
+): StoredImage {
   const m = /^data:([a-z/+-]+);base64,(.+)$/is.exec(dataUrl.trim());
   if (!m) throw errors.validation('That does not look like an image file.');
   const ext = TYPES[m[1].toLowerCase()];
@@ -77,7 +94,7 @@ export function storeDataUrl(dataUrl: string): StoredImage {
 
   const base = dir();
   sweep(base);
-  const name = `${randomBytes(16).toString('hex')}.${ext}`;
+  const name = `${opts.pinned ? PIN : ''}${randomBytes(16).toString('hex')}.${ext}`;
   writeFileSync(join(base, name), buf, { mode: 0o644 });
 
   const origin = getConfig().PUBLIC_BASE_URL.replace(/\/+$/, '');
@@ -101,7 +118,7 @@ function sweep(base: string): void {
   try {
     const cutoff = Date.now() - KEEP_MS;
     for (const f of readdirSync(base)) {
-      if (!NAME.test(f)) continue;
+      if (!NAME.test(f) || f.startsWith(PIN)) continue;
       const p = join(base, f);
       if (statSync(p).mtimeMs < cutoff) unlinkSync(p);
     }

@@ -4,6 +4,15 @@ import { errors } from '../lib/errors';
 import { q, qOne } from '../db/pool';
 import { Role, ROLE_RANK } from '../types';
 import { sqlToIso } from '../lib/dates';
+import {
+  cacheFirmRow,
+  cacheMember,
+  cacheSession,
+  cachedFirmRow,
+  cachedMember,
+  cachedSession,
+  CachedSession,
+} from '../lib/caches';
 
 /**
  * Bearer-token authentication (§7.2). Loads the session row so that revoked
@@ -19,25 +28,43 @@ export async function authenticate(req: FastifyRequest, _reply: FastifyReply): P
   // Joined rather than fetched separately: `requireVerified` runs on almost
   // every route, and paying a second round trip per request to read one
   // TINYINT would be silly.
-  const session = await qOne<{
-    id: string;
-    user_id: string;
-    revoked_at: string | null;
-    expires_at: string;
-    email_verified: number;
-  }>(
-    `SELECT s.id, s.user_id, s.revoked_at, s.expires_at, u.email_verified
-       FROM sessions s JOIN users u ON u.id = s.user_id
-      WHERE s.id = ?`,
-    [sid],
-  );
-  if (!session) throw errors.unauthenticated('Unknown session');
-  if (session.revoked_at) throw errors.tokenRevoked();
-  if (session.expires_at <= sqlNowForCompare()) throw errors.tokenExpired();
+  //
+  // Cached for a few seconds because the app polls every fifteen: this one
+  // statement used to be a request unit on every poll, forever, to re-learn
+  // that a session which is good for sixty days is still good. A miss is only
+  // the *first* request of the window — every revocation path clears the entry
+  // the moment it revokes, so this never keeps a dead session alive (see
+  // `invalidateSession`).
+  let session = cachedSession(sid);
+  if (!session) {
+    const row = await qOne<{
+      user_id: string;
+      revoked_at: string | null;
+      expires_at: string;
+      email_verified: number;
+    }>(
+      `SELECT s.user_id, s.revoked_at, s.expires_at, u.email_verified
+         FROM sessions s JOIN users u ON u.id = s.user_id
+        WHERE s.id = ?`,
+      [sid],
+    );
+    // A session that does not exist is not cached: it is rare, and a negative
+    // entry is one more thing that could be wrong.
+    if (!row) throw errors.unauthenticated('Unknown session');
+    session = {
+      userId: row.user_id,
+      revoked: !!row.revoked_at,
+      expiresAt: row.expires_at,
+      emailVerified: !!row.email_verified,
+    } satisfies CachedSession;
+    cacheSession(sid, session);
+  }
+  if (session.revoked) throw errors.tokenRevoked();
+  if (session.expiresAt <= sqlNowForCompare()) throw errors.tokenExpired();
 
   req.userId = sub;
   req.sessionId = sid;
-  req.emailVerified = !!session.email_verified;
+  req.emailVerified = session.emailVerified;
   touchLastUsed(sid);
 }
 
@@ -61,12 +88,19 @@ export async function authenticateVerified(req: FastifyRequest, reply: FastifyRe
 }
 
 /**
- * Lazy `last_used_at` refresh, throttled to ~1/min/session and fire-and-forget so
- * the request never waits on it (and a failure never fails the request). Without
- * this, `GET /auth/sessions` would order every session by its creation time.
+ * Lazy `last_used_at` refresh, fire-and-forget so the request never waits on it
+ * (and a failure never fails the request). Without this, `GET /auth/sessions`
+ * would order every session by its creation time.
+ *
+ * Throttled to a quarter of an hour, not a minute. It used to be a minute,
+ * which cost 5.1 request units per session per minute of use — to buy a
+ * precision nothing reads. Everything that consumes this column rounds it well
+ * past fifteen minutes: the app's Sessions screen prints `Fmt.date`, a calendar
+ * day, and the console's analytics bucket it into "active in the last 7 days"
+ * and "last 30 days".
  */
 const lastTouched = new Map<string, number>();
-const TOUCH_INTERVAL_MS = 60_000;
+const TOUCH_INTERVAL_MS = 15 * 60_000;
 
 function touchLastUsed(sessionId: string): void {
   const now = Date.now();
@@ -101,11 +135,8 @@ function sqlNowForCompare(): string {
 export async function firmAccess(req: FastifyRequest): Promise<void> {
   const firmId = (req.params as any)?.firmId;
   if (typeof firmId !== 'string' || firmId.length === 0) throw errors.notFound();
-  const firm = await qOne<{ id: string; deleted_at: string | null }>(
-    'SELECT id, deleted_at FROM firms WHERE id = ?',
-    [firmId],
-  );
-  if (!firm || firm.deleted_at) {
+  const firm = await firmRow(firmId);
+  if (!firm || firm.deleted) {
     // Do not leak the distinction between "no firm" and "not a member".
     const m = firm ? await member(firmId, req.userId) : null;
     if (!m) throw errors.notAFirmMember();
@@ -117,11 +148,34 @@ export async function firmAccess(req: FastifyRequest): Promise<void> {
   req.firmRole = m.role;
 }
 
+/**
+ * Both of these are cached for a minute. Together they were two request units
+ * on every single authenticated request — asked four times a minute per firm by
+ * the poll loop, to re-learn facts an admin changes a few times a year. Every
+ * route that changes a firm or its members calls `invalidateFirm`.
+ */
+async function firmRow(firmId: string): Promise<{ deleted: boolean } | null> {
+  const hit = cachedFirmRow(firmId);
+  if (hit !== undefined) return hit;
+  const row = await qOne<{ deleted_at: string | null }>(
+    'SELECT deleted_at FROM firms WHERE id = ?',
+    [firmId],
+  );
+  const value = row ? { deleted: !!row.deleted_at } : null;
+  cacheFirmRow(firmId, value);
+  return value;
+}
+
 async function member(firmId: string, userId: string): Promise<{ role: Role } | null> {
-  return qOne<{ role: Role }>('SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ?', [
-    firmId,
-    userId,
-  ]);
+  const hit = cachedMember(firmId, userId);
+  if (hit !== undefined) return hit;
+  const row = await qOne<{ role: Role }>(
+    'SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ?',
+    [firmId, userId],
+  );
+  const value = row ? { role: row.role } : null;
+  cacheMember(firmId, userId, value);
+  return value;
 }
 
 /** Role gate per the §7.3 matrix. */

@@ -35,7 +35,10 @@ const pushSchema = z.object({
 export function registerSyncRoutes(app: FastifyInstance): void {
   app.get('/firms/:firmId/sync/pull', { preHandler: [authenticateVerified, firmAccess] }, async (req) => {
     const qy = parse(pullQuerySchema, req.query ?? {});
-    return pull(req.firmId, req.userId, qy.cursor, qy.limit, qy.deviceId);
+    // `userId` and `deviceId` used to be passed so pull could record the
+    // device's cursor in `sync_state`. That write is gone (see pull.ts), and
+    // with it the only reason pull needed to know who was asking.
+    return pull(req.firmId, qy.cursor, qy.limit);
   });
 
   // Read-only, and read by a device that has nothing yet — a restoring client

@@ -118,16 +118,19 @@ export async function createEntry(firmId: string, userId: string, data: FreightW
       return;
     }
     if (existing) {
-      // Tombstoned id: resurrect in place. Re-inserting would collide on the PK,
-      // and the original serial is kept because serials are never reused (§5.1).
+      // Tombstoned id: resurrect in place — re-inserting would collide on the
+      // PK. Its old serial has since been handed to whatever moved down to
+      // fill the gap (§5.1 compaction), so this needs a fresh one, not the one
+      // it had before.
+      const serial = await allocateSerial(c, firmId);
       await c.query(
         `UPDATE freight_entries SET date=?, party_id=?, location_id=?, vehicle_no=?, revenue_per_bag=?, bags=?,
            total_reimbursed=?, basis=?, cost_rate=?, cost_units=?, other_expenses=?, other_note=?, total_cost=?,
-           profit=?, deleted_at = NULL, rev = rev + 1, updated_by = ?
+           profit=?, deleted_at = NULL, serial = ?, rev = rev + 1, updated_by = ?
          WHERE firm_id = ? AND id = ?`,
         [data.date, data.partyId, data.locationId, data.vehicleNo, data.revenuePerBag, data.bags,
          data.totalReimbursed, data.basis, data.costRate, data.costUnits, data.otherExpenses, data.otherNote,
-         data.totalCost, data.profit, userId, firmId, id],
+         data.totalCost, data.profit, serial, userId, firmId, id],
       );
       await writeGradeBags(c, firmId, id, data.gradeBags ?? {});
       return;
@@ -243,11 +246,56 @@ export async function patchEntry(
   return (await fetchEntry(firmId, id))!;
 }
 
-export async function deleteEntry(firmId: string, userId: string, id: string): Promise<void> {
-  await q(
-    'UPDATE freight_entries SET deleted_at = UTC_TIMESTAMP(3), rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ? AND deleted_at IS NULL',
-    [userId, firmId, id],
+/**
+ * §5.1 compaction: once an entry is gone, every later entry in the same firm
+ * shifts down by one serial, so the visible sequence is always 1..N with no
+ * hole to explain. Order matters — shifting low-to-high never collides with
+ * the (firm_id, serial_live) unique key, because by the time a row's target
+ * value is written, the row that used to hold it has already moved off it.
+ * (Tombstones never enter into this: `serial_live` is a generated column that
+ * reads NULL once `deleted_at` is set, so a deleted row's old number stops
+ * blocking anything the instant it dies, however many times it gets reused
+ * afterwards.) `rev` and `updated_at` are bumped on every shifted row so the
+ * change reaches already-synced devices through the ordinary cursor pull
+ * (§9.2), the same as any other edit.
+ */
+export async function compactSerialsAfterDelete(
+  c: PoolConnection,
+  firmId: string,
+  deletedSerial: number,
+  userId: string,
+): Promise<void> {
+  const [rows] = await c.query(
+    'SELECT id FROM freight_entries WHERE firm_id = ? AND serial > ? AND deleted_at IS NULL ORDER BY serial ASC',
+    [firmId, deletedSerial],
   );
+  for (const r of rows as any[]) {
+    await c.query(
+      'UPDATE freight_entries SET serial = serial - 1, rev = rev + 1, updated_at = UTC_TIMESTAMP(3), updated_by = ? WHERE firm_id = ? AND id = ?',
+      [userId, firmId, r.id],
+    );
+  }
+  // Whether or not anything was above it, one fewer serial is now in use.
+  await c.query('UPDATE firm_counters SET freight_serial = GREATEST(freight_serial - 1, 0) WHERE firm_id = ?', [
+    firmId,
+  ]);
+}
+
+export async function deleteEntry(firmId: string, userId: string, id: string): Promise<void> {
+  await tx(async (c) => {
+    const [rows] = await c.query(
+      'SELECT serial FROM freight_entries WHERE firm_id = ? AND id = ? AND deleted_at IS NULL',
+      [firmId, id],
+    );
+    const row = (rows as any[])[0];
+    if (!row) return; // already gone — nothing to tombstone or compact
+    const serial = Number(row.serial);
+    await c.query(
+      'UPDATE freight_entries SET deleted_at = UTC_TIMESTAMP(3), rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?',
+      [userId, firmId, id],
+    );
+    await compactSerialsAfterDelete(c, firmId, serial, userId);
+  });
 }
 
 export async function listEntries(

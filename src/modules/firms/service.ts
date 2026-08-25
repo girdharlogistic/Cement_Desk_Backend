@@ -1,4 +1,5 @@
 import { PoolConnection } from 'mysql2/promise';
+import { invalidateFirm } from '../../lib/caches';
 import { q, qOne, tx } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { newId } from '../../lib/ids';
@@ -78,6 +79,7 @@ export async function patchFirm(
     return mapFirm((await qOne('SELECT * FROM firms WHERE id = ?', [firmId]))!);
   }
   await q(`UPDATE firms SET ${sets.join(', ')} WHERE id = ? AND deleted_at IS NULL`, [...params, firmId]);
+  invalidateFirm(firmId);
   const row = await qOne('SELECT * FROM firms WHERE id = ?', [firmId]);
   if (!row) throw errors.notFound('Firm not found');
   return mapFirm(row);
@@ -122,6 +124,11 @@ export async function deleteFirm(userId: string, firmId: string): Promise<void> 
     await c.query('DELETE FROM firm_counters WHERE firm_id = ?', [firmId]);
     await c.query('UPDATE firms SET deleted_at = UTC_TIMESTAMP(3) WHERE id = ?', [firmId]);
   });
+  // After the commit, never inside it: a rolled-back transaction that had
+  // already cleared the cache would leave the next request to re-read the same
+  // rows and cache them again — harmless, but the ordering that is actually
+  // dangerous is the reverse, so keep it explicit.
+  invalidateFirm(firmId);
 }
 
 // ---------------------------------------------------------------- members
@@ -193,6 +200,10 @@ export async function acceptInvite(userId: string, rawToken: string): Promise<Fi
     if (!firm) throw errors.notFound('Firm not found');
     await c.query('INSERT IGNORE INTO firm_members (firm_id, user_id, role) VALUES (?,?,?)', [firmId, userId, role]);
     await c.query('UPDATE auth_tokens SET used_at = UTC_TIMESTAMP(3) WHERE id = ?', [tok.id]);
+    // Inside the transaction here because the value being invalidated is a
+    // *negative* one — "this user is not a member" — and leaving that cached
+    // would lock the new member out of the firm they just joined.
+    invalidateFirm(firmId);
     return mapFirm(firm, role);
   });
 }
@@ -224,6 +235,7 @@ export async function patchMemberRole(
     }
     await c.query('UPDATE firm_members SET role = ? WHERE firm_id = ? AND user_id = ?', [role, firmId, targetUserId]);
   });
+  invalidateFirm(firmId);
 }
 
 export async function removeMember(actorRole: Role, actorUserId: string, firmId: string, targetUserId: string): Promise<void> {
@@ -240,4 +252,7 @@ export async function removeMember(actorRole: Role, actorUserId: string, firmId:
     }
     await c.query('DELETE FROM firm_members WHERE firm_id = ? AND user_id = ?', [firmId, targetUserId]);
   });
+  // A removed member must stop being able to read the firm now, not in a
+  // minute — this is the one membership change with a security edge to it.
+  invalidateFirm(firmId);
 }
