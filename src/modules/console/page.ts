@@ -222,6 +222,7 @@ export const consolePage = (opts: {
   <button class="tab on" data-tab="send" role="tab" type="button">Notification</button>
   <button class="tab" data-tab="sponsor" role="tab" type="button">Sponsored card</button>
   <button class="tab" data-tab="plans" role="tab" type="button">Plans</button>
+  <button class="tab" data-tab="subs" role="tab" type="button">Subscribers</button>
   <button class="tab" data-tab="users" role="tab" type="button">User data feed</button>
   <button class="tab" data-tab="analytics" role="tab" type="button">Users & analysis</button>
 </div>
@@ -352,6 +353,34 @@ export const consolePage = (opts: {
   opened, and keeps the last copy so the card still draws with no connection.
   Expect up to five minutes before a change reaches every phone.
 </div>
+</div>
+
+<div id="panel-subs" hidden>
+  <div class="stat-grid" id="sub-stats"></div>
+
+  <div class="hint" style="margin-top:18px"><b>Paying, right now</b></div>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Account</th><th>Plan</th><th>Status</th><th>Renews / ends</th></tr></thead>
+      <tbody id="sub-live-body"></tbody>
+    </table>
+  </div>
+
+  <div class="hint" style="margin-top:18px"><b>Comped (granted by hand)</b></div>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Account</th><th>Plan</th><th>Status</th><th>Renews / ends</th></tr></thead>
+      <tbody id="sub-grant-body"></tbody>
+    </table>
+  </div>
+
+  <div class="hint" style="margin-top:18px"><b>Lapsed — had it, let it go</b></div>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Account</th><th>Plan</th><th>Status</th><th>Ended</th></tr></thead>
+      <tbody id="sub-lapsed-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <div id="panel-users" hidden>
@@ -580,6 +609,7 @@ const HEADS = {
   send: ['Send a notification', null],
   sponsor: ['Sponsored card', 'The card at the top of Home, on every install.'],
   plans: ['Plans', 'How many plans there are and what each one unlocks. Prices live in Play Console.'],
+  subs: ['Subscribers', 'Who is paying, who was comped, and who let it lapse.'],
   users: ['User data feed', 'Browse every account, search it, and open one for the full picture.'],
   analytics: ['Users & analysis', 'Platform-wide numbers: growth, activity, and the busiest books.'],
 };
@@ -825,7 +855,76 @@ function drawPlans() {
   }
 }
 
-async function loadPlans() {
+// ── Subscribers ────────────────────────────────────────────────────────────
+// Revenue truth, not feature truth: a live row here is money. Comped
+// accounts get their own table so they never inflate the count that matters,
+// and grace has its own chip because that is a payment retry in progress —
+// the difference between "renewed" and "renewal failing" is exactly that.
+function subRow(s, showEnd) {
+  const tr = el('tr');
+  tr.style.cursor = 'pointer';
+  tr.addEventListener('click', () => openUser(s.userId));
+  const first = el('td', null, s.email);
+  tr.appendChild(first);
+  tr.appendChild(el('td', null, s.planName || ''));
+  const st = el('td');
+  st.appendChild(
+    s.status === 'grace'
+      ? el('span', 'pill bad', 'grace — payment retry')
+      : pill(s.status === 'active', 'active', s.status),
+  );
+  tr.appendChild(st);
+  let end = 'no expiry';
+  if (s.daysLeft !== null && s.daysLeft !== undefined) {
+    if (showEnd) end = fmt(s.expiresAt);
+    else if (s.daysLeft === 0) end = 'ends today';
+    else if (s.daysLeft > 0) end = s.daysLeft + 'd left · ' + fmt(s.expiresAt);
+    else end = 'ended ' + fmt(s.expiresAt);
+  }
+  tr.appendChild(el('td', 'sub', end));
+  return tr;
+}
+
+function fillSubTable(id, rows, emptyText) {
+  const body = $(id);
+  body.textContent = '';
+  if (!rows.length) {
+    const tr = el('tr');
+    const td = el('td', 'sub', emptyText);
+    td.colSpan = 4;
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const s of rows) body.appendChild(subRow(s, body === $('sub-lapsed-body')));
+}
+
+async function loadSubs() {
+  const r = await fetch('/console/subscribers', { credentials: 'same-origin' });
+  if (r.status === 401) { location.href = '/console'; return; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return;
+  const stat = $('sub-stats');
+  stat.textContent = '';
+  const items = [
+    ['Paying', j.live.length],
+    ['Comped', j.grantLive.length],
+    ['Lapsed', j.lapsed.length],
+    ['Free tier', j.freeTierCount],
+  ];
+  for (const [label, n] of items) {
+    const box = el('div', 'stat');
+    box.appendChild(el('div', 'num', String(n)));
+    box.appendChild(el('div', 'lbl', label));
+    stat.appendChild(box);
+  }
+  fillSubTable('sub-live-body', j.live, 'Nobody is paying yet.');
+  fillSubTable('sub-grant-body', j.grantLive, 'No hand-grants running.');
+  fillSubTable('sub-lapsed-body', j.lapsed, 'Nobody has lapsed.');
+}
+TAB_INIT.subs = loadSubs;
+
+ async function loadPlans() {
   const r = await fetch('/console/plans', { credentials: 'same-origin' });
   if (!r.ok) return;
   const j = await r.json();

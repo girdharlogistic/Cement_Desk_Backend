@@ -22,7 +22,7 @@ import { readSponsor, writeSponsor, SponsorInput } from '../sponsor/repo';
 import { sendToTopic } from './fcm';
 import { readStored, storeDataUrl } from './media';
 import { consolePage, loginPage } from './page';
-import { analytics, getUserDetail, listUsers } from './users';
+import { analytics, getUserDetail, listSubscriptions, listUsers } from './users';
 
 /**
  * A small web console for sending push notifications, at `/console`.
@@ -351,6 +351,17 @@ export function registerConsoleRoutes(app: FastifyInstance): void {
     const user = await getUserDetail(req.params.id);
     if (!user) throw errors.notFound('No such user');
     return { ok: true, user };
+  });
+
+  app.get('/console/subscribers', async (req, reply) => {
+    if (!enabled()) throw errors.notFound('Route not found');
+    const operator = await currentOperator(req);
+    if (!operator) {
+      return reply
+        .code(401)
+        .send({ error: { code: 'UNAUTHENTICATED', message: 'Sign in again.', requestId: req.id } });
+    }
+    return { ok: true, ...(await listSubscriptions()) };
   });
 
   app.get('/console/analytics', async (req, reply) => {

@@ -213,6 +213,90 @@ export async function getUserDetail(userId: string): Promise<UserDetail | null> 
   };
 }
 
+export interface SubscriptionRow {
+  userId: string;
+  email: string;
+  planName: string | null;
+  period: string | null;
+  source: string;
+  status: string;
+  expiresAt: string | null;
+  /** Negative when the expiry has already passed. */
+  daysLeft: number | null;
+  note: string;
+}
+
+/**
+ * Who has ever held a plan, split the way an operator thinks about it:
+ *
+ * * `live` — premium right now: a plan, in `active` or `grace`, unexpired.
+ *   `grace` is in here on purpose (Play's payment-retry window), with its own
+ *   status chip so a renewals problem shows up as a colour, not an absence.
+ * * `lapsed` — had a plan and no longer does, by expiry or cancellation.
+ *   This is the churn list.
+ * * `grantLive` — same premium features, but comped: `source='grant'`. Kept as
+ *   its own bucket so freebies never get mistaken for revenue.
+ *
+ * Free-tier rows (the grandfathering rows from migration 0008) come back only
+ * as a count: an operator care about "who pays", not "who was grandfathered".
+ */
+export interface Subscriptions {
+  live: SubscriptionRow[];
+  lapsed: SubscriptionRow[];
+  grantLive: SubscriptionRow[];
+  freeTierCount: number;
+}
+
+export async function listSubscriptions(): Promise<Subscriptions> {
+  const rows = await q<any>(
+    `SELECT u.id AS user_id, u.email, e.plan_id, p.name AS plan_name, p.period,
+            e.source, e.status, e.expires_at, e.note
+       FROM entitlements e
+       JOIN users u ON u.id = e.user_id
+       LEFT JOIN plans p ON p.id = e.plan_id
+      ORDER BY e.updated_at DESC`,
+  );
+
+  const live: SubscriptionRow[] = [];
+  const lapsed: SubscriptionRow[] = [];
+  const grantLive: SubscriptionRow[] = [];
+  let freeTierCount = 0;
+  const now = Date.now();
+
+  for (const r of rows) {
+    // A free-tier row carries grandfathering, not a plan — it is noise here.
+    if (!r.plan_id) {
+      freeTierCount++;
+      continue;
+    }
+    const expiresAt = sqlToIso(r.expires_at);
+    const isLive =
+      (r.status === 'active' || r.status === 'grace') &&
+      (!r.expires_at || Date.parse(r.expires_at) > now);
+    const row: SubscriptionRow = {
+      userId: r.user_id,
+      email: r.email,
+      planName: r.plan_name ?? '(deleted plan)',
+      period: r.period ?? null,
+      source: r.source,
+      status: r.status,
+      expiresAt,
+      daysLeft: r.expires_at
+        ? Math.floor((Date.parse(r.expires_at) - now) / 86_400_000)
+        : null,
+      note: r.note ?? '',
+    };
+    if (isLive) (row.source === 'grant' ? grantLive : live).push(row);
+    else lapsed.push(row);
+  }
+
+  // Live soonest-to-expire first — that is the watch list. Lapsed most
+  // recently expired first — those are the warmest win-backs.
+  live.sort((a, b) => (a.daysLeft ?? Infinity) - (b.daysLeft ?? Infinity));
+  lapsed.sort((a, b) => (b.daysLeft ?? -Infinity) - (a.daysLeft ?? -Infinity));
+  return { live, lapsed, grantLive, freeTierCount };
+}
+
 export interface Analytics {
   totalUsers: number;
   verifiedUsers: number;
