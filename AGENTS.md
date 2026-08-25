@@ -172,10 +172,10 @@ share it (different scopes). The key was proven against `androidpublisher` on
 for a malformed token and 404 for a well-formed-but-unknown one; both map to
 the same validation error in the route.
 
-**The `plans` table is empty.** `/billing/verify` 500s until `monthly` and
-`yearly` rows (sku `premium`, period `month`/`year`) are created via the
-console — deliberately: inventing a plan would grant features nobody decided
-on.
+**The `plans` table is populated** (2026-08-25): "Premium Monthly" and
+"Premium Yearly" (sku `premium`, period `month`/`year`, unlimited everything
++ adFree + export — the §3 table, operator-decided). Retire by clearing
+`active`, never by delete while held.
 
 ### Not built yet
 
