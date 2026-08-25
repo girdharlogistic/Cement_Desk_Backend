@@ -92,7 +92,7 @@ Send `"km"`, `"perBag"`, `"quarterly"` — never the legacy Dart ordinal integer
 | Claim `status` | `claimable`, `claimed`, `received` |
 | Member `role` | `owner`, `admin`, `member`, `viewer` |
 
-The **only** place integer enums are accepted is the backup import endpoint (§12), because
+The **only** place integer enums are accepted is the backup import endpoint (§13), because
 the legacy on-device JSON backups store them that way.
 
 ### Sync metadata on every tenant record
@@ -398,7 +398,7 @@ Branch on `error.code`, never on the message text.
 | 409 | `DAY_BEFORE_BASELINE` | Stock day must be strictly after the baseline date. |
 | 409 | `LAST_OWNER` | Firm must keep ≥ 1 owner. |
 | 409 | `LAST_FIRM` | User must keep ≥ 1 firm. |
-| 413 | `PAYLOAD_TOO_LARGE` | Over the body cap (§13). |
+| 413 | `PAYLOAD_TOO_LARGE` | Over the body cap (§14). |
 | 422 | `BUSINESS_RULE_VIOLATION` | Valid syntax, illegal business state. Message is user-showable. |
 | 429 | `RATE_LIMITED` | Back off. Honour the `Retry-After` response header (seconds). |
 | 500 | `INTERNAL` | Server bug. Report with the `requestId`. |
@@ -989,7 +989,54 @@ local storage only. Syncing them makes one device's UI jump when another is used
 
 ---
 
-## 12. Import / export
+## 12. Plans, entitlement & billing
+
+Subscriptions are bought through **Play Billing**; the server's job is to say what
+each plan unlocks and to turn a purchase token into an entitlement. All three routes
+need a Bearer token but **not** a verified email — someone mid-signup can already
+have been charged, and owning money they cannot collect is the worst funnel there is.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/plans` | The offer: `{ plans: [{ id, name, description, sku, period, features }] }` |
+| GET | `/me/entitlement` | What this user may do: `{ entitlement: {...} }` |
+| POST | `/billing/verify` | `{ purchaseToken }` → the fresh `{ entitlement }` |
+
+**No prices, anywhere.** Neither `/plans` nor the entitlement carries one — by
+design. Take `sku` (+ Play base plan `monthly`/`yearly`) to Play Billing and let
+Play quote the price in the user's currency; a price echoed by our API could only
+ever disagree with what Play charges. `sku` values with no price are normal for
+grant-only plans.
+
+`features` is `{ adFree, excelExport, maxFirms, maxDevices }`; a limit of **-1**
+means unlimited. Entitlement `status` is the server's own: `free`, `active`,
+`grace`, `expired`, `cancelled`. Only `active`/`grace` arrive with premium
+features attached — the server already lapses anything whose `expiresAt` has
+passed, so the client never reasons about expiry itself. `grace` is Play's
+payment-retry window and counts as entitled.
+
+**Buying.** On every purchase update (`purchaseStream`), send the purchase token
+to `/billing/verify`, then complete the purchase in the store SDK — in that order.
+The server verifies the token with Play, **acknowledges it** (Play refunds an
+unacknowledged purchase in 3 days), checks the anti-sharing binding, and writes the
+entitlement with `source: 'play'`. The call is idempotent, so the client should
+verify on *every* purchase event, including `restored` ones from
+`restorePurchases()`. Errors worth handling:
+
+- **409 `PURCHASE_ALREADY_LINKED`** — the token belongs to another account.
+- **400 `VALIDATION_FAILED`** — Play does not recognise the token (bogus or refund-/fraud-state).
+- **502 `PLAY_UNAVAILABLE`** — Google was unreachable; retry later.
+
+Cache the last entitlement on disk and keep trusting it while offline — a dealer in
+a godown with no signal must not lose features they paid for. Refresh on app start
+and after any purchase event; the server caches 60 s, so this is cheap. The
+client-side gates are conveniences only: the server is the authority, and once
+billing enforcement is on it rejects over-limit actions regardless of what any
+cached entitlement claims.
+
+---
+
+## 13. Import / export
 
 | Method | Path | Returns | Min role |
 |---|---|---|---|
@@ -1016,7 +1063,7 @@ Body cap for this endpoint is **25 MB** (1 MB everywhere else). Send an `Idempot
 
 ---
 
-## 13. Rate limits and size caps
+## 14. Rate limits and size caps
 
 Exceeding a limit returns **429 `RATE_LIMITED`** with a **`Retry-After`** header in seconds.
 Honour it — back off, don't hammer.
@@ -1037,7 +1084,7 @@ Pagination caps: list endpoints max `limit=500`; sync pull max `limit=2000`.
 
 ---
 
-## 14. Traps worth reading before you start
+## 15. Traps worth reading before you start
 
 Ranked by how much time they will cost you if you miss them.
 
