@@ -12,6 +12,7 @@ import { registerSyncRoutes } from './modules/sync/routes';
 import { registerBackupRoutes } from './modules/backup/routes';
 import { registerAccountRoutes } from './modules/account/routes';
 import { registerAdsTxtRoute } from './modules/ads_txt';
+import { registerSiteRoutes } from './modules/site/routes';
 import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
@@ -115,6 +116,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Root-level and unauthenticated because that is where Google's crawler
   // looks — it derives the URL from the Play listing's developer website.
   registerAdsTxtRoute(app);
+
+  // Also root-level and public: the developer-website URL on the Play listing
+  // sends strangers here, and a 404 envelope is not a welcome mat.
+  registerSiteRoutes(app);
 
   // Also outside /api/v1, and also public: Play requires the deletion route to
   // be reachable in a browser by someone who has already uninstalled the app.
