@@ -4,7 +4,9 @@ Architecture lives in the `cement-desk` skill and in `BACKEND_SPEC.md` /
 `FRONTEND_INTEGRATION.md`. This file is the other thing: what is **in flight**,
 what was learned the hard way, and which invariants will bite you.
 
-Last updated: 2026-08-25, at commit `655242a`.
+Last updated: 2026-08-25, at commit `737dcbc`. Since `655242a`: `/billing/verify`,
+the seeded plan rows, the console Subscribers tab, and the public landing page
+at `/` all landed; the app shipped the client half of premium at v1.4.4+26.
 
 ---
 
@@ -49,7 +51,7 @@ adding one: create a scratch database, run the whole `migrations/` chain into
 it, compare `SHOW CREATE TABLE` against production, drop it. That check is what
 caught nothing this time — and would have caught the lost migration immediately.
 
-Backend tooling works fully here: `npm run build`, `npm test` (60 unit tests
+Backend tooling works fully here: `npm run build`, `npm test` (72 unit tests
 pass, 18 integration skipped without `TEST_DATABASE_URL`). **Flutter is not
 installed** — the app cannot be built or run on this machine. Use
 `/tmp/dart-sdk/bin/dart` for `dart format` and note that `dart analyze` is
@@ -184,16 +186,23 @@ the same validation error in the route.
   until a real purchase has been through end to end — flipping it early locks
   out the four multi-firm and three multi-device accounts by accident rather
   than by decision.
-- Everything app-side: `in_app_purchase`, paywall, entitlement cache in Hive,
-  the gates, the rewarded ad, ads off when premium.
+- ~~Everything app-side~~ — **done, shipped in app v1.4.4+26**
+  (`Cement_Desk_Android` commits `23700a3`, `64f114d`): `in_app_purchase`,
+  paywall, entitlement cache in Hive, the gates, the rewarded ad, ads off when
+  premium. Server-side enforcement (`BILLING_ENFORCED`) is the only piece
+  still open; the last client check is `canAddFirmProvider`, everything else
+  rides on trust until then.
 
 ---
 
 ## 4. Ads (app repo)
 
-Four live units in `lib/ads/ad_ids.dart`: two banner bands, an app-open ad on
+Five live units in `lib/ads/ad_ids.dart`: two banner bands, an app-open ad on
 every fifth foreground, a 300×250 on More, and a rewarded unit
-(`…/4355641966`) reserved for the export gate but not wired yet.
+(`…/4355641966`) wired into the export gate (`lib/features/billing/export_gate.dart`
+— free users watch for a plain export, fail open if no ad loads). The Home
+hero "native" slot is not AdMob — it is the first-party sponsor card served by
+this repo's `/app/sponsor`.
 
 `AdIds.useTestIds` has been flipped on and off repeatedly during development.
 **It must be `false` in any release** or the build earns nothing — and `false`
