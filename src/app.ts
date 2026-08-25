@@ -15,6 +15,7 @@ import { registerAdsTxtRoute } from './modules/ads_txt';
 import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
+import { registerBillingRoutes } from './modules/billing/routes';
 import { bumpFirmData, cacheSizes } from './lib/caches';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -131,6 +132,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       registerBackupRoutes(api);
       registerSponsorRoutes(api);
       registerPlanRoutes(api);
+      registerBillingRoutes(api);
     },
     { prefix: '/api/v1' },
   );

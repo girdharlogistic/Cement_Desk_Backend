@@ -153,14 +153,32 @@ Android Publisher API answers 200, so the Play Console grant is in place.
 Config: `PLAY_SA_KEY_FILE`, `PLAY_PACKAGE_NAME`, `PLAY_PRODUCT_ID`,
 `PLAY_RTDN_SECRET`, `BILLING_ENFORCED`.
 
+### Built since
+
+`POST /api/v1/billing/verify` (`modules/billing`): the app sends the purchase
+token, the server checks the anti-sharing binding **before** asking Play (a
+shared token learns nothing from us, not even whether it is valid), verifies
+via `purchases.subscriptionsv2.get`, **acknowledges before granting** (Play
+auto-refunds an unacknowledged purchase in three days — crashing between the
+two is lost revenue), maps the state (`active`/`grace`; CANCELED counts while
+paid-through is ahead; READ-ONLY-read-only otherwise refused), and writes the
+entitlement with `source='play'`. Re-verify is idempotent, so the app can call
+it whenever it sees a purchase.
+
+OAuth for Google APIs was factored into `src/lib/google_sa.ts`; FCM and Play
+share it (different scopes). The key was proven against `androidpublisher` on
+2026-08-25 — a bogus token comes back Play's own `400 Invalid Value`, not a
+401, so auth and console permissions are in place. Note Play answers **400**
+for a malformed token and 404 for a well-formed-but-unknown one; both map to
+the same validation error in the route.
+
+**The `plans` table is empty.** `/billing/verify` 500s until `monthly` and
+`yearly` rows (sku `premium`, period `month`/`year`) are created via the
+console — deliberately: inventing a plan would grant features nobody decided
+on.
+
 ### Not built yet
 
-- `POST /billing/verify` — app sends the purchase token, server calls
-  `purchases.subscriptionsv2.get`, writes `entitlements` with `source='play'`.
-  A token already bound to one user must never entitle a second; that is the
-  entire anti-sharing story.
-- **Acknowledgement.** Play auto-refunds a purchase that is not acknowledged
-  within three days. Missing this is straight lost revenue.
 - RTDN webhook for renewals, cancellations and grace (needs a Pub/Sub topic).
 - Enforcement itself. **`BILLING_ENFORCED` is `false` and must stay false**
   until a real purchase has been through end to end — flipping it early locks

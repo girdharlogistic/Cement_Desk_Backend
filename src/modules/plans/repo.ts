@@ -153,6 +153,21 @@ export async function readEntitlement(userId: string): Promise<EntitlementRow | 
   return r ? mapEntitlement(r) : null;
 }
 
+/**
+ * Who holds this Play purchase token, if anyone.
+ *
+ * `purchase_token != ''` because free-tier rows (grandfathering, revokes) all
+ * carry an empty token — the index is on the column itself, so every free row
+ * would otherwise match every lookup of a token that was never granted.
+ */
+export async function readEntitlementByToken(purchaseToken: string): Promise<EntitlementRow | null> {
+  const r = await qOne<any>(
+    `SELECT * FROM entitlements WHERE purchase_token = ? AND purchase_token != ''`,
+    [purchaseToken],
+  );
+  return r ? mapEntitlement(r) : null;
+}
+
 export interface EntitlementUpsert {
   userId: string;
   planId: string | null;
