@@ -25,6 +25,7 @@ const TABLES: Record<string, string> = {
   baseline: 'opening_baselines',
   stockDays: 'stock_days',
   purchases: 'purchases',
+  schemeFolders: 'scheme_folders',
   schemes: 'schemes',
   claims: 'claims',
 };

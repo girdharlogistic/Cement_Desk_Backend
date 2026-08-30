@@ -66,7 +66,7 @@ export async function importBackup(
     await tx(async (c) => {
       for (const t of [
         'parties', 'locations', 'grades', 'party_routes', 'freight_entries', 'opening_baselines',
-        'stock_days', 'companies', 'sources', 'purchases', 'schemes', 'claims',
+        'stock_days', 'companies', 'sources', 'purchases', 'scheme_folders', 'schemes', 'claims',
       ]) {
         await c.query(`UPDATE ${t} SET deleted_at = UTC_TIMESTAMP(3), updated_by = ?, rev = rev + 1 WHERE firm_id = ? AND deleted_at IS NULL`, [userId, firmId]);
       }
@@ -147,6 +147,7 @@ export async function importBackup(
       dayId = newId();
       await c.query('INSERT INTO stock_days (firm_id, id, date, updated_by) VALUES (?,?,?,?)', [firmId, dayId, r.date, userId]);
     }
+    await c.query('UPDATE stock_days SET note = ? WHERE firm_id = ? AND id = ?', [r.note ?? '', firmId, dayId]);
     // Restore semantics: the sheet in the file IS the sheet (full replace of children).
     await c.query('DELETE FROM stock_receipts WHERE firm_id = ? AND stock_day_id = ?', [firmId, dayId]);
     await c.query('DELETE FROM stock_day_cells WHERE firm_id = ? AND stock_day_id = ?', [firmId, dayId]);
@@ -180,17 +181,26 @@ export async function importBackup(
     }
   });
 
+  // Folders before the schemes that point at them — schemes.folder_id is a
+  // real FK, so a scheme written first would be rejected outright.
+  await write('schemeFolders', p.schemeFolders, (c, r: any) =>
+    upsertSync(c, 'scheme_folders', ['firm_id', 'id', 'name', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.order, userId]));
+
   await write('schemes', p.schemes, async (c, r: any) => {
     await upsertSync(c, 'schemes',
-      ['firm_id', 'id', 'name', 'company_id', 'grade_id', 'per_grade', 'source_id', 'kind', 'period', 'window_from', 'window_to', 'qty_unit', 'value_type', 'min_premium_qty', 'min_premium_unit', 'active', 'updated_by'],
-      [firmId, r.id, r.name, r.companyId, r.gradeId, r.perGrade ? 1 : 0, r.sourceId, r.kind, r.period, r.windowFrom, r.windowTo, r.qtyUnit, r.valueType, r.minPremiumQty, r.minPremiumUnit, r.active ? 1 : 0, userId]);
+      ['firm_id', 'id', 'name', 'company_id', 'folder_id', 'grade_id', 'per_grade', 'source_id', 'kind', 'period', 'window_from', 'window_to', 'qty_unit', 'value_type', 'min_premium_qty', 'min_premium_unit', 'active', 'updated_by'],
+      [firmId, r.id, r.name, r.companyId, r.folderId, r.gradeId, r.perGrade ? 1 : 0, r.sourceId, r.kind, r.period, r.windowFrom, r.windowTo, r.qtyUnit, r.valueType, r.minPremiumQty, r.minPremiumUnit, r.active ? 1 : 0, userId]);
     await c.query('DELETE FROM scheme_slabs WHERE firm_id = ? AND scheme_id = ?', [firmId, r.id]);
     await c.query('DELETE FROM scheme_premium_grades WHERE firm_id = ? AND scheme_id = ?', [firmId, r.id]);
+    await c.query('DELETE FROM scheme_grades WHERE firm_id = ? AND scheme_id = ?', [firmId, r.id]);
     for (const s of r.slabs) {
       await c.query('INSERT INTO scheme_slabs (firm_id, scheme_id, slab_from, slab_value) VALUES (?,?,?,?)', [firmId, r.id, s.from, s.value]);
     }
     for (const g of r.premiumGradeIds) {
       await c.query('INSERT INTO scheme_premium_grades (firm_id, scheme_id, grade_id) VALUES (?,?,?)', [firmId, r.id, g]);
+    }
+    for (const g of r.gradeIds) {
+      await c.query('INSERT INTO scheme_grades (firm_id, scheme_id, grade_id) VALUES (?,?,?)', [firmId, r.id, g]);
     }
   });
 
@@ -294,6 +304,12 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
     return { id: String(r?.id), name: String(r?.name ?? ''), type: type ?? 'plant', order: num(r?.order) };
   }).filter((r) => isUuid(r.id));
 
+  const schemeFolders = arr(body, 'schemeFolders').map((r, i) => {
+    if (!isUuid(r?.id)) err('schemeFolders', i, 'id', 'id must be a UUID');
+    if (typeof r?.name !== 'string' || !r.name.trim()) err('schemeFolders', i, 'name', 'name is required');
+    return { id: String(r?.id), name: String(r?.name ?? ''), order: num(r?.order) };
+  }).filter((r) => isUuid(r.id));
+
   const mergeSet = (a: Set<string>, b?: Set<string>) => {
     const out = new Set(a);
     b?.forEach((x) => out.add(x));
@@ -304,6 +320,7 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
   const gradeIds = mergeSet(idSet(grades), dbSets?.grades);
   const companyIds = mergeSet(idSet(companies), dbSets?.companies);
   const sourceIds = mergeSet(idSet(sources), dbSets?.sources);
+  const folderIds = idSet(schemeFolders);
 
   const routes = arr(body, 'routes').flatMap((r, i) => {
     let partyId = r?.partyId; let locationId = r?.locationId;
@@ -361,7 +378,7 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
         (rowsMap[pid] ??= {})[gid] = { billing, dispatch };
       }
     }
-    return [{ date, receipts, rows: rowsMap }];
+    return [{ date, note: String(r?.note ?? '').slice(0, 500), receipts, rows: rowsMap }];
   });
 
   const seenDayDates = new Set<string>();
@@ -409,7 +426,24 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
     if (!isUuid(r?.id)) { err('schemes', i, 'id', 'id must be a UUID'); return []; }
     if (typeof r?.name !== 'string' || !r.name.trim()) { err('schemes', i, 'name', 'name is required'); return []; }
     if (!isUuid(r?.companyId) || !companyIds.has(r.companyId)) { err('schemes', i, 'companyId', 'unknown company'); return []; }
-    if (r?.gradeId != null && !gradeIds.has(r.gradeId)) err('schemes', i, 'gradeId', 'unknown grade');
+    // Grade scope: `gradeIds` when the file has it, else the pre-multi-grade
+    // single `gradeId` (whose null meant "all grades" — the empty set).
+    const rawGradeIds: string[] = Array.isArray(r?.gradeIds)
+      ? r.gradeIds
+      : (r?.gradeId != null ? [r.gradeId] : []);
+    const schemeGradeIds = Array.from(new Set(rawGradeIds.map((g: any) => String(g)))).filter((g) => {
+      const ok = isUuid(g) && gradeIds.has(g);
+      if (!ok) warnings.push(`schemes[${i}].gradeIds: unknown grade '${g}' dropped`);
+      return ok;
+    });
+    // Dropping every named grade would silently widen the scheme from "these
+    // two grades" to "all grades" — a bigger claim than the letter allows.
+    if (rawGradeIds.length > 0 && schemeGradeIds.length === 0) {
+      err('schemes', i, 'gradeIds', 'every named grade is unknown; the scheme would widen to all grades');
+    }
+    if (r?.folderId != null && !folderIds.has(r.folderId)) {
+      warnings.push(`schemes[${i}].folderId: unknown folder '${r.folderId}' — imported unfiled`);
+    }
     if (r?.sourceId != null && !sourceIds.has(r.sourceId)) err('schemes', i, 'sourceId', 'unknown source');
     const kind = enumFromLegacy<'fixed' | 'variable' | 'mix' | 'cash'>('SchemeKind', r?.kind, 'fixed' as const) ?? 'fixed';
     const period = enumFromLegacy<'monthly' | 'quarterly' | 'annual'>('SchemePeriod', r?.period ?? null);
@@ -431,7 +465,10 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
     });
     if (kind === 'mix' && premiumGradeIds.length === 0) err('schemes', i, 'premiumGradeIds', 'mix schemes need premium grades');
     return [{
-      id: r.id, name: String(r.name), companyId: r.companyId, gradeId: r.gradeId ?? null,
+      id: r.id, name: String(r.name), companyId: r.companyId,
+      gradeIds: schemeGradeIds,
+      gradeId: schemeGradeIds.length === 1 ? schemeGradeIds[0] : null,
+      folderId: r?.folderId != null && folderIds.has(r.folderId) ? r.folderId : null,
       perGrade: !!r?.perGrade, sourceId: r?.sourceId ?? null,
       kind, period, windowFrom, windowTo,
       qtyUnit: enumFromLegacy<'bag' | 'mt'>('QtyUnit', r?.qtyUnit, 'bag' as const) ?? 'bag',
@@ -494,7 +531,7 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
   if (errorsL.length) return { errors: errorsL, warnings };
   return {
     errors: [], warnings,
-    parsed: { parties, locations, grades, companies, sources, routes, baseline, stockDays, freightEntries, schemes, purchases, claims },
+    parsed: { parties, locations, grades, companies, sources, routes, baseline, stockDays, freightEntries, schemeFolders, schemes, purchases, claims },
   };
 }
 

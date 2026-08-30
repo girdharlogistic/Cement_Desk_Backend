@@ -1,0 +1,69 @@
+# Cement Desk backend — verification.
+#
+# Compiles the TypeScript and runs the unit suite on every push and pull
+# request. It does not deploy: the server runs from `dist/` on its own host
+# behind a Cloudflare tunnel, and putting a new build there is a deliberate
+# `npm run build && sudo systemctl restart cementdesk-backend` on that machine.
+#
+# The integration suite is skipped here on purpose. It needs TEST_DATABASE_URL
+# pointing at a reachable TiDB/MySQL, and the credentials for the real one are
+# not going into a CI runner. `npm test` skips it by itself when the variable is
+# absent, so this stays a green, secret-free check.
+#
+# Migrations are checked for shape only — they run at boot against the real
+# database, in filename order, and are recorded in `_migrations`. A duplicate
+# number would mean two files racing for the same slot.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      # Cheap, and it catches the one migration mistake that is painful to undo:
+      # two files claiming the same number. The migrator sorts by filename, so
+      # which of the pair runs first is alphabetical accident, and only one gets
+      # recorded under its own name.
+      - name: Check migration numbering
+        run: |
+          set -euo pipefail
+          dupes=$(ls migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::Duplicate migration numbers: $dupes"
+            exit 1
+          fi
+          echo "Migrations:"
+          ls migrations/*.sql | xargs -n1 basename

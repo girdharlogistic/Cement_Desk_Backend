@@ -24,6 +24,7 @@ export function mapStockDay(r: any, receipts: any[], cells: any[]): any {
     id: r.id,
     firmId: r.firm_id,
     date: r.date,
+    note: r.note ?? '',
     clientKey: `${r.firm_id}|${r.date}`, // client natural key (§1.2 / §9.6)
     receipts: receipts.map((x) => ({
       id: x.id,
@@ -202,6 +203,26 @@ export async function putCell(
         [firmId, day.id, cell.partyId, cell.gradeId, cell.billing, cell.dispatch],
       );
     }
+    await bumpDay(c, firmId, day.id, userId);
+  });
+  return getStockDay(firmId, date);
+}
+
+/**
+ * The day's free-text remark. Its own route rather than a field on the cell
+ * PUT: the client saves it on a typing pause, not per keystroke, so it moves
+ * on a completely different rhythm from the numbers.
+ */
+export async function putDayNote(
+  firmId: string,
+  userId: string,
+  date: string,
+  note: string,
+): Promise<any> {
+  const day = await getDayRow(firmId, date);
+  if (!day) throw errors.notFound('No stock sheet for this date');
+  await tx(async (c) => {
+    await c.query('UPDATE stock_days SET note = ? WHERE firm_id = ? AND id = ?', [note, firmId, day.id]);
     await bumpDay(c, firmId, day.id, userId);
   });
   return getStockDay(firmId, date);

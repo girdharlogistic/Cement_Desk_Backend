@@ -19,8 +19,8 @@ import { firmWatermark } from '../../lib/caches';
 function noChanges(): Record<string, unknown[] | null> {
   return {
     parties: [], locations: [], grades: [], routes: [], companies: [], sources: [],
-    freightEntries: [], baseline: null, stockDays: [], purchases: [], schemes: [],
-    claims: [],
+    freightEntries: [], baseline: null, stockDays: [], purchases: [], schemeFolders: [],
+    schemes: [], claims: [],
   };
 }
 
@@ -162,17 +162,23 @@ export async function pull(
   const puPayments = await paymentsFor(null, firmId, pu.filter((r) => !r.deleted_at).map((r) => r.id));
   changes.purchases = pu.map((r) => mapPurchase(r, puPayments));
 
+  // Folders before the schemes that point at them — the client applies these
+  // in the order they appear, and a scheme filed under a folder it has not
+  // seen yet would render as unfiled until the next pull.
+  changes.schemeFolders = (await page('scheme_folders')).map((r) => mapMasterRow('scheme_folders', r));
+
   const sc = await page('schemes');
   const scIds = sc.filter((r) => !r.deleted_at).map((r) => r.id);
-  let slabs: any[] = []; let premium: any[] = [];
+  let slabs: any[] = []; let premium: any[] = []; let schemeGrades: any[] = [];
   if (scIds.length) {
     const ph = scIds.map(() => '?').join(',');
-    [slabs, premium] = await Promise.all([
+    [slabs, premium, schemeGrades] = await Promise.all([
       q<any>(`SELECT * FROM scheme_slabs WHERE firm_id = ? AND scheme_id IN (${ph}) ORDER BY slab_from ASC`, [firmId, ...scIds]),
       q<any>(`SELECT * FROM scheme_premium_grades WHERE firm_id = ? AND scheme_id IN (${ph})`, [firmId, ...scIds]),
+      q<any>(`SELECT * FROM scheme_grades WHERE firm_id = ? AND scheme_id IN (${ph})`, [firmId, ...scIds]),
     ]);
   }
-  changes.schemes = sc.map((r) => mapScheme(r, slabs, premium));
+  changes.schemes = sc.map((r) => mapScheme(r, slabs, premium, schemeGrades));
 
   const cl = await page('claims');
   const clIds = cl.filter((r) => !r.deleted_at).map((r) => r.id);

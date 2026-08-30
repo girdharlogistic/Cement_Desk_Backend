@@ -32,6 +32,8 @@ export async function exportBackup(firmId: string): Promise<any> {
   const schemes = await grab<any>('SELECT * FROM schemes WHERE firm_id = ?', [firmId]);
   const slabs = await grab<any>('SELECT * FROM scheme_slabs WHERE firm_id = ? ORDER BY slab_from', [firmId]);
   const premium = await grab<any>('SELECT * FROM scheme_premium_grades WHERE firm_id = ?', [firmId]);
+  const schemeGrades = await grab<any>('SELECT * FROM scheme_grades WHERE firm_id = ?', [firmId]);
+  const folders = await grab<any>('SELECT * FROM scheme_folders WHERE firm_id = ? ORDER BY sort_order', [firmId]);
   const claims = await grab<any>('SELECT * FROM claims WHERE firm_id = ? ORDER BY period_from', [firmId]);
   const notes = await grab<any>('SELECT * FROM claim_credit_notes WHERE firm_id = ? ORDER BY date', [firmId]);
   const counter = await grab<any>('SELECT freight_serial FROM firm_counters WHERE firm_id = ?', [firmId]);
@@ -86,7 +88,7 @@ export async function exportBackup(firmId: string): Promise<any> {
     baseline,
     stockDays: live(days).map((r) => ({
       id: `${firmId}|${r.date}`, // client natural key (§1.2)
-      firmId, date: r.date,
+      firmId, date: r.date, note: r.note ?? '',
       receipts: receipts.filter((x) => x.stock_day_id === r.id).map((x) => ({
         id: x.id, gradeId: x.grade_id, qty: num(x.qty), sapQty: num(x.sap_qty), ref: x.ref,
       })),
@@ -102,8 +104,14 @@ export async function exportBackup(firmId: string): Promise<any> {
       qty: num(r.qty), ratePerBag: num(r.rate_per_bag), invoiceNo: r.invoice_no,
       payments: payments.filter((p) => p.purchase_id === r.id).map((p) => ({ id: p.id, date: p.date, amount: num(p.amount) })),
     })),
+    schemeFolders: live(folders).map((r) => ({ id: r.id, firmId, name: r.name, order: Number(r.sort_order) })),
     schemes: live(schemes).map((r) => ({
-      id: r.id, firmId, name: r.name, companyId: r.company_id, gradeId: r.grade_id,
+      id: r.id, firmId, name: r.name, companyId: r.company_id,
+      gradeIds: schemeGrades.filter((g) => g.scheme_id === r.id).map((g) => g.grade_id),
+      // Kept alongside `gradeIds` so a restore into an app build that predates
+      // multi-grade schemes still lands the single-grade case correctly.
+      gradeId: r.grade_id,
+      folderId: r.folder_id ?? null,
       perGrade: !!r.per_grade, sourceId: r.source_id,
       kind: enumToLegacy('SchemeKind', r.kind), period: enumToLegacy('SchemePeriod', r.period),
       windowFrom: r.window_from, windowTo: r.window_to,

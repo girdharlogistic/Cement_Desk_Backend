@@ -3,9 +3,9 @@ import { q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { isUuid, newId } from '../../lib/ids';
 
-export type MasterTable = 'parties' | 'locations' | 'grades' | 'companies' | 'sources';
+export type MasterTable = 'parties' | 'locations' | 'grades' | 'companies' | 'sources' | 'scheme_folders';
 
-const TABLES: MasterTable[] = ['parties', 'locations', 'grades', 'companies', 'sources'];
+const TABLES: MasterTable[] = ['parties', 'locations', 'grades', 'companies', 'sources', 'scheme_folders'];
 
 export function assertMasterTable(t: string): asserts t is MasterTable {
   if (!TABLES.includes(t as MasterTable)) throw errors.notFound('Unknown entity');
@@ -129,10 +129,19 @@ export async function deleteWithCascade(c: PoolConnection, table: MasterTable, f
     await bumpDaysForCellCleanup(c, firmId, 'party_id', id, userId);
   } else if (table === 'grades') {
     // DECISION D5 (safer option): refuse when purchases/schemes still reference.
+    // Both grade columns have to be checked. `schemes.grade_id` is the legacy
+    // single-grade field, still written for older clients; `scheme_grades` is
+    // where a multi-grade scope actually lives, and a grade that appears only
+    // there would otherwise be deletable out from under a live scheme.
     const [used] = await c.query(
       `SELECT (SELECT COUNT(*) FROM purchases WHERE firm_id = ? AND grade_id = ? AND deleted_at IS NULL) AS p,
-              (SELECT COUNT(*) FROM schemes   WHERE firm_id = ? AND grade_id = ? AND deleted_at IS NULL) AS s`,
-      [firmId, id, firmId, id],
+              (SELECT COUNT(*) FROM schemes s2
+                 WHERE s2.firm_id = ? AND s2.deleted_at IS NULL
+                   AND (s2.grade_id = ?
+                        OR EXISTS (SELECT 1 FROM scheme_grades g2
+                                     WHERE g2.firm_id = s2.firm_id AND g2.scheme_id = s2.id AND g2.grade_id = ?))
+              ) AS s`,
+      [firmId, id, firmId, id, id],
     );
     const { p, s } = (used as any[])[0];
     if (Number(p) > 0 || Number(s) > 0) {
@@ -168,6 +177,14 @@ export async function deleteWithCascade(c: PoolConnection, table: MasterTable, f
         [userId, firmId, id],
       );
     }
+  } else if (table === 'scheme_folders') {
+    // A folder is filing, not ownership: deleting one unfiles its schemes and
+    // deletes none of them. The rev bump is what makes the change reach other
+    // devices — the scheme row itself is what they pull, not the folder.
+    await c.query(
+      'UPDATE schemes SET folder_id = NULL, rev = rev + 1, updated_by = ? WHERE firm_id = ? AND folder_id = ?',
+      [userId, firmId, id],
+    );
   }
 }
 

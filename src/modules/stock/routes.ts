@@ -19,6 +19,7 @@ const cellSchema = z.object({
   billing: z.number().min(0),
   dispatch: z.number().min(0),
 });
+const noteSchema = z.object({ note: z.string().max(500).default('') });
 const receiptSchema = z.object({
   id: z.string().uuid().optional(),
   gradeId: z.string().uuid(),
@@ -75,6 +76,16 @@ export function registerStockRoutes(app: FastifyInstance): void {
       const date = businessDateOr400((req.params as any).date, 'date');
       const body = parse(cellSchema, req.body);
       return { day: await svc.putCell(req.firmId, req.userId, date, body) };
+    },
+  );
+
+  app.put(
+    '/firms/:firmId/stock-days/:date/note',
+    { preHandler: [authenticateVerified, firmAccess, requireRole('member')] },
+    async (req) => {
+      const date = businessDateOr400((req.params as any).date, 'date');
+      const body = parse(noteSchema, req.body);
+      return { day: await svc.putDayNote(req.firmId, req.userId, date, body.note) };
     },
   );
 

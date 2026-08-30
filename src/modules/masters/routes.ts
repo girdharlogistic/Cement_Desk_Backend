@@ -135,6 +135,29 @@ export const MASTER_DEFS: MasterDef[] = [
     }),
     orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',
   },
+  // Scheme folders ride the master machinery rather than getting a module of
+  // their own: they are a firm-scoped name + sort order and nothing else, which
+  // is exactly what MASTER_DEFS already does — CRUD routes, sync push/delete,
+  // reorder — with the one folder-specific rule (delete unfiles, never
+  // deletes) living in deleteWithCascade.
+  {
+    apiName: 'schemeFolders',
+    table: 'scheme_folders',
+    createSchema: z.object({ id: idField, name: name160, order: orderField }),
+    patchSchema: z.object({ name: name160.optional(), order: orderField }),
+    toCols: (b) => ({
+      ...(b.name !== undefined ? { name: b.name } : {}),
+      ...(b.order !== undefined ? { sort_order: b.order } : {}),
+    }),
+    mapRow: (r) => ({
+      id: r.id,
+      firmId: r.firm_id,
+      name: r.name,
+      order: Number(r.sort_order),
+      ...syncMeta(r),
+    }),
+    orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',
+  },
 ];
 
 export function mapMasterRow(table: MasterTable | 'party_routes', row: any): any {
@@ -280,7 +303,9 @@ function sing(apiName: string): string {
         ? 'source'
         : apiName === 'grades'
           ? 'grade'
-          : 'location';
+          : apiName === 'schemeFolders'
+            ? 'schemeFolder'
+            : 'location';
 }
 
 /** Route list helper for sync pull (shared with §9). */

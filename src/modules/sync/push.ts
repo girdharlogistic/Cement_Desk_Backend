@@ -9,6 +9,7 @@ import { MASTER_DEFS } from '../masters/routes';
 import { deleteWithCascade, softDeleteRow } from '../masters/service';
 import { mapFreightEntry, compactSerialsAfterDelete } from '../freight/service';
 import { mapPurchase } from '../landing/purchases';
+import { normalizeGradeIds, legacyGradeId } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
 import { claimAutoStatus, sortSlabs } from '../../lib/validators';
 
@@ -42,7 +43,7 @@ interface Ctx {
 export async function push(firmId: string, userId: string, mutations: Mutation[]): Promise<PushOutcome[]> {
   const GROUP_ORDER = [
     'grades', 'parties', 'locations', 'companies', 'sources', 'routes', 'baseline',
-    'stockDays', 'freightEntries', 'schemes', 'purchases', 'purchasePayments', 'claims', 'claimCreditNotes',
+    'stockDays', 'freightEntries', 'schemeFolders', 'schemes', 'purchases', 'purchasePayments', 'claims', 'claimCreditNotes',
   ];
   const byEntity = new Map<string, Mutation[]>();
   for (const m of mutations) {
@@ -79,7 +80,7 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
 async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   try {
     switch (m.entity) {
-      case 'parties': case 'locations': case 'grades': case 'companies': case 'sources':
+      case 'parties': case 'locations': case 'grades': case 'companies': case 'sources': case 'schemeFolders':
         return m.op === 'upsert' ? await masterUpsert(ctx, m) : await masterDelete(ctx, m);
       case 'routes': return m.op === 'upsert' ? await routeUpsert(ctx, m) : await routeDelete(ctx, m);
       case 'freightEntries': return m.op === 'upsert' ? await freightUpsert(ctx, m) : await freightDelete(ctx, m);
@@ -354,6 +355,12 @@ async function stockDayUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       }
     }
   }
+  // The day's remark rides along with the sheet: last writer wins, like every
+  // other scalar on a stock day. Absent means "not mentioned in this push",
+  // which must not blank a note another device wrote.
+  if (m.data?.note !== undefined) {
+    await ctx.c.query('UPDATE stock_days SET note = ? WHERE firm_id = ? AND id = ?', [String(m.data.note ?? '').slice(0, 500), ctx.firmId, day.id]);
+  }
   const [revRows] = await ctx.c.query('UPDATE stock_days SET rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?', [ctx.userId, ctx.firmId, day.id]);
   void revRows;
   const fresh = ((await ctx.c.query('SELECT rev FROM stock_days WHERE firm_id = ? AND id = ?', [ctx.firmId, day.id]))[0] as any[])[0];
@@ -526,36 +533,51 @@ async function schemeUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
     return reject(m, e.code ?? 'VALIDATION_FAILED', e.message);
   }
   if (!isUuid(d.companyId)) return reject(m, 'VALIDATION_FAILED', 'scheme needs companyId');
+  const gradeIds = normalizeGradeIds(d);
+  if (gradeIds.some((g) => !isUuid(g))) return reject(m, 'VALIDATION_FAILED', 'gradeIds must be UUIDs');
+  let folderId: string | null = d.folderId ?? null;
+  if (folderId !== null && !isUuid(folderId)) return reject(m, 'VALIDATION_FAILED', 'folderId must be a UUID');
+  if (folderId !== null) {
+    const [f] = await ctx.c.query('SELECT id FROM scheme_folders WHERE firm_id = ? AND id = ? AND deleted_at IS NULL', [ctx.firmId, folderId]);
+    // A folder deleted on another device before this scheme reached us must
+    // not reject the scheme — the scheme is the record that matters, so it
+    // lands unfiled instead, which is where that delete would have put it.
+    if (!(f as any[]).length) folderId = null;
+  }
   const [rows] = await ctx.c.query('SELECT * FROM schemes WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing) {
     if (!d.name) return reject(m, 'VALIDATION_FAILED', 'scheme needs name');
     await ctx.c.query(
-      `INSERT INTO schemes (firm_id, id, name, company_id, grade_id, per_grade, source_id, kind, period, window_from, window_to,
+      `INSERT INTO schemes (firm_id, id, name, company_id, folder_id, grade_id, per_grade, source_id, kind, period, window_from, window_to,
          qty_unit, value_type, min_premium_qty, min_premium_unit, active, updated_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [ctx.firmId, m.id, String(d.name), d.companyId, d.gradeId ?? null, d.perGrade ? 1 : 0, d.sourceId ?? null,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [ctx.firmId, m.id, String(d.name), d.companyId, folderId, legacyGradeId(gradeIds), d.perGrade ? 1 : 0, d.sourceId ?? null,
        input.kind, input.period, input.windowFrom, input.windowTo, input.qtyUnit, input.valueType, input.minPremiumQty,
        d.minPremiumUnit === 'bag' ? 'bag' : 'mt', input.active ? 1 : 0, ctx.userId],
     );
   } else {
     await ctx.c.query(
-      `UPDATE schemes SET name=?, company_id=?, grade_id=?, per_grade=?, source_id=?, kind=?, period=?, window_from=?, window_to=?,
+      `UPDATE schemes SET name=?, company_id=?, folder_id=?, grade_id=?, per_grade=?, source_id=?, kind=?, period=?, window_from=?, window_to=?,
          qty_unit=?, value_type=?, min_premium_qty=?, min_premium_unit=?, active=?, deleted_at=NULL, rev=rev+1, updated_by=?
        WHERE firm_id=? AND id=?`,
-      [d.name ?? existing.name, d.companyId, d.gradeId ?? null, d.perGrade ? 1 : 0, d.sourceId ?? null, input.kind, input.period, input.windowFrom,
+      [d.name ?? existing.name, d.companyId, folderId, legacyGradeId(gradeIds), d.perGrade ? 1 : 0, d.sourceId ?? null, input.kind, input.period, input.windowFrom,
        input.windowTo, input.qtyUnit, input.valueType, input.minPremiumQty, d.minPremiumUnit === 'bag' ? 'bag' : 'mt',
        input.active ? 1 : 0, ctx.userId, ctx.firmId, m.id],
     );
   }
-  if (d.slabs !== undefined || d.premiumGradeIds !== undefined || !existing) {
+  if (d.slabs !== undefined || d.premiumGradeIds !== undefined || d.gradeIds !== undefined || !existing) {
     await ctx.c.query('DELETE FROM scheme_slabs WHERE firm_id = ? AND scheme_id = ?', [ctx.firmId, m.id]);
     await ctx.c.query('DELETE FROM scheme_premium_grades WHERE firm_id = ? AND scheme_id = ?', [ctx.firmId, m.id]);
+    await ctx.c.query('DELETE FROM scheme_grades WHERE firm_id = ? AND scheme_id = ?', [ctx.firmId, m.id]);
     for (const s of sortSlabs(input.slabs)) {
       await ctx.c.query('INSERT INTO scheme_slabs (firm_id, scheme_id, slab_from, slab_value) VALUES (?,?,?,?)', [ctx.firmId, m.id, s.from, s.value]);
     }
     for (const g of Array.from(new Set(input.premiumGradeIds))) {
       await ctx.c.query('INSERT INTO scheme_premium_grades (firm_id, scheme_id, grade_id) VALUES (?,?,?)', [ctx.firmId, m.id, g]);
+    }
+    for (const g of gradeIds) {
+      await ctx.c.query('INSERT INTO scheme_grades (firm_id, scheme_id, grade_id) VALUES (?,?,?)', [ctx.firmId, m.id, g]);
     }
   }
   const rev = Number(((await ctx.c.query('SELECT rev FROM schemes WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]))[0] as any[])[0].rev);

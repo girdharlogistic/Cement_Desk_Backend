@@ -31,7 +31,11 @@ const schemeSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(200),
   companyId: z.string().uuid(),
+  // Empty = every grade. `gradeId` stays accepted for clients that predate
+  // multi-grade schemes; the service normalises the two into one set.
+  gradeIds: z.array(z.string().uuid()).max(200).optional(),
   gradeId: z.string().uuid().nullish(),
+  folderId: z.string().uuid().nullish(),
   perGrade: z.boolean().default(false),
   sourceId: z.string().uuid().nullish(),
   kind: z.enum(['fixed', 'variable', 'mix', 'cash']),
