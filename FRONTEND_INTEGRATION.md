@@ -407,8 +407,9 @@ Branch on `error.code`, never on the message text.
 
 ## 6. Masters
 
-Five entities share one identical CRUD shape: **parties, locations, grades, companies,
-sources**. Everything below applies to all five; only the fields and the response key differ.
+Six entities share one identical CRUD shape: **parties, locations, grades, companies,
+sources, schemeFolders**. Everything below applies to all six; only the fields and the
+response key differ.
 
 | Method | Path | Returns | Min role |
 |---|---|---|---|
@@ -419,7 +420,8 @@ sources**. Everything below applies to all five; only the fields and the respons
 | POST | `/firms/{firmId}/{entity}/reorder` | **204** | member |
 
 **Response key is singular**: `parties` → `{ "party": {…} }`, `locations` → `{ "location": {…} }`,
-`grades` → `{ "grade": {…} }`, `companies` → `{ "company": {…} }`, `sources` → `{ "source": {…} }`.
+`grades` → `{ "grade": {…} }`, `companies` → `{ "company": {…} }`, `sources` → `{ "source": {…} }`,
+`schemeFolders` → `{ "schemeFolder": {…} }`.
 
 **POST returns 201 when it created a row and 200 when it updated an existing id.** Sending a
 create with an id that already exists is an idempotent upsert, and it will resurrect a
@@ -436,6 +438,7 @@ tombstoned record. Treat 200 and 201 the same way.
 | `grades` | `{ id?, name, order?, bagWeightKg? }` | `bagWeightKg` (default `50`) |
 | `companies` | `{ id?, name, order? }` | `order` |
 | `sources` | `{ id?, name, type?, order? }` | `type` (`plant`/`depot`, default `plant`) |
+| `schemeFolders` | `{ id?, name, order? }` | `order` |
 
 `name` is 1–160 chars (1–80 for grades). `order` is 0–1,000,000. PATCH bodies are the same
 fields, all optional, minus `id`.
@@ -473,6 +476,9 @@ Deletes are soft (tombstones). Cascades the server performs for you:
 - **Grade** → **refused with 422** if any live purchase or scheme still references it. Delete
   those first. Otherwise its baseline entries, stock cells and receipts are removed.
 - **Company** → cascades to its purchases, schemes, and those schemes' claims.
+- **Scheme folder** → its schemes are **unfiled, never deleted**: `folderId` is set to null and
+  each affected scheme gets a `rev` bump so your next pull sees the move. A folder is filing,
+  not ownership.
 - **Location**, **Source** → no cascade.
 
 ---
@@ -657,6 +663,7 @@ valid strictly after the baseline. Delete or move those days first.
 | POST | `/firms/{firmId}/stock-days` | **201** `{ day }` | member |
 | GET | `/firms/{firmId}/stock-days/{date}` | `{ day }` | any member |
 | PUT | `/firms/{firmId}/stock-days/{date}/cells` | `{ day }` | member |
+| PUT | `/firms/{firmId}/stock-days/{date}/note` | `{ day }` | member |
 | POST | `/firms/{firmId}/stock-days/{date}/receipts` | **201** `{ day }` | member |
 | DELETE | `/firms/{firmId}/stock-days/{date}/receipts/{receiptId}` | **200** `{ day }` | member |
 | DELETE | `/firms/{firmId}/stock-days/{date}` | **204** | member |
@@ -671,6 +678,7 @@ without a follow-up GET.
   "id": "…uuid…",
   "firmId": "…",
   "date": "2026-08-14",
+  "note": "SAP down tha, 2 truck raste mein",
   "clientKey": "firmUuid|2026-08-14",
   "receipts": [
     { "id": "…", "gradeId": "…", "qty": 500, "sapQty": 500, "ref": "INV-9" }
@@ -698,6 +706,21 @@ PUT /firms/{firmId}/stock-days/2026-08-14/cells
 One cell per call. **Writing `billing: 0, dispatch: 0` deletes the cell** rather than storing
 zeros, and the returned `rows` map will simply not contain that key. Your grid must treat a
 missing key as zero — do not expect a dense matrix.
+
+### The day's remark
+
+```json
+PUT /firms/{firmId}/stock-days/2026-08-14/note
+{ "note": "SAP down tha, 2 truck raste mein" }
+```
+
+One free-text remark per sheet, max 500 characters; `""` clears it. It has its own route
+rather than riding on the cell PUT because it is written on a completely different rhythm —
+the app saves a cell on every keystroke, but a remark only when typing pauses and when the
+field loses focus, since a sentence would otherwise cost a dozen round trips to type.
+
+Over sync it is a plain field on the day. **Omitting `note` from a `stockDays` upsert leaves
+the stored value alone** — it is not "set it to empty". Send `""` to clear.
 
 ### Receipts
 
@@ -761,7 +784,9 @@ Bill value is not stored; compute `qty * ratePerBag` for display.
   "id": "client-uuid",
   "name": "Q2 Volume Scheme",
   "companyId": "…",
-  "gradeId": null,            // optional single grade
+  "gradeIds": [],             // grade scope; EMPTY = ALL GRADES
+  "gradeId": null,            // derived, read-only in practice — see below
+  "folderId": null,           // optional scheme folder; null = unfiled
   "perGrade": false,
   "sourceId": null,
   "kind": "fixed",            // fixed | variable | mix | cash
@@ -786,9 +811,31 @@ Validation rules, all returning `400 VALIDATION_FAILED`:
 - `kind: "mix"` needs a non-empty `premiumGradeIds`, and `minPremiumQty >= 0`.
 - `kind: "variable"` needs both `windowFrom` and `windowTo`, with `windowFrom <= windowTo`.
 - `kind: "fixed"` and `"mix"` need a `period`.
+- `folderId`, if not null, must be a live folder in this firm — otherwise
+  `400 VALIDATION_FAILED` with `field: "folderId"`. The **sync push is deliberately more
+  forgiving**: a scheme naming a folder that no longer exists is stored unfiled rather than
+  rejected, because a folder deleted on another device must not cost you the scheme.
 
-`PATCH` merges: slabs and `premiumGradeIds` are only rewritten if you actually send those keys.
-Send the complete array when you do — it is a replace, not an append.
+#### `gradeIds` vs `gradeId`
+
+`gradeIds` is the grade scope and **an empty array means every grade** — the absence of a
+filter, never "no grades". A company letter routinely names two or three of the grades you
+trade, which the old single `gradeId` could not express: it could only say "one" or (null)
+"all".
+
+`gradeId` is still present and still accepted, purely for compatibility:
+
+- **Reading**, it is derived — the single grade when `gradeIds` has exactly one entry, `null`
+  otherwise. A two-grade scheme therefore reads back as `gradeId: null`, which an old client
+  interprets as "all grades". That is the safe direction: it over-reads rather than silently
+  attributing the scheme to one wrong grade.
+- **Writing**, it is only consulted when you send no `gradeIds` at all. `gradeIds` always
+  wins when both are present.
+
+Send `gradeIds`. Only fall back to `gradeId` if you are on a build that predates it.
+
+`PATCH` merges: slabs, `premiumGradeIds` and `gradeIds` are only rewritten if you actually
+send those keys. Send the complete array when you do — it is a replace, not an append.
 
 **Deleting a scheme also deletes its claims.** This is intentional (§5.6 of the spec).
 
@@ -879,7 +926,7 @@ remember your cursor. Omit `cursor` entirely for a **full sync from the beginnin
     "freightEntries": [],
     "baseline": null,
     "stockDays": [],
-    "purchases": [], "schemes": [], "claims": []
+    "purchases": [], "schemeFolders": [], "schemes": [], "claims": []
   }
 }
 ```
@@ -890,8 +937,8 @@ Rules:
 - **Tombstones are included** — records with `deletedAt != null`. That is how deletes reach you.
   Apply them as deletes locally.
 - **Parents arrive with children inlined**: a `stockDay` carries its `receipts` and `rows`, a
-  `purchase` its `payments`, a `scheme` its `slabs` and `premiumGradeIds`, a `claim` its
-  `creditNotes`. Children have no independent cursor.
+  `purchase` its `payments`, a `scheme` its `slabs`, `gradeIds` and `premiumGradeIds`, a
+  `claim` its `creditNotes`. Children have no independent cursor.
 - `baseline` is a single object or `null` (null meaning "unchanged since your cursor"), not an array.
 - **If `hasMore` is true, immediately pull again with the returned `nextCursor`.** Loop until it
   is false.
@@ -950,7 +997,12 @@ are safe to retry.
 ### Entity names for push
 
 `parties`, `locations`, `grades`, `companies`, `sources`, `routes`, `baseline`, `stockDays`,
-`freightEntries`, `schemes`, `purchases`, `purchasePayments`, `claims`, `claimCreditNotes`
+`freightEntries`, `schemeFolders`, `schemes`, `purchases`, `purchasePayments`, `claims`,
+`claimCreditNotes`
+
+They are applied **in that order** — `schemeFolders` before `schemes` for the same reason
+`companies` comes before `purchases`: a scheme filed under a folder the server has not seen
+yet would land unfiled.
 
 Note these are the **push** names. The `changes` object in a pull uses the same names except
 that purchase payments and credit notes are inlined into their parents rather than appearing
@@ -975,7 +1027,7 @@ is the key mapping, and after the first successful push you can use the UUID dir
 
 | Entity | Policy | What it means for you |
 |---|---|---|
-| Masters (parties, locations, grades, companies, sources, routes) | **Last-write-wins** | Your push always applies. Low stakes. |
+| Masters (parties, locations, grades, companies, sources, schemeFolders, routes) | **Last-write-wins** | Your push always applies. Low stakes. |
 | `freightEntries`, `purchases` | **Reject on `rev` mismatch** | You **must** send an accurate `rev`. Omitting it on an existing row is treated as a conflict. Show a merge prompt. |
 | `stockDays` cells | **Field-level merge** | Cells merge per `(party, grade)`. A stale `rev` does **not** reject — two people filling different parties on the same sheet both succeed. |
 | `baseline` | **Reject on mismatch** | Changing it re-rates every later day. |
