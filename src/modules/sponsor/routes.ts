@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { sqlToIso } from '../../lib/dates';
-import { readSponsor } from './repo';
+import { linkText, readSponsor } from './repo';
 
 /**
  * What the app reads to draw the sponsored card on Home.
@@ -31,7 +31,15 @@ export function registerSponsorRoutes(app: FastifyInstance): void {
         byLine: s.byLine,
         pitch: s.pitch,
         cta: s.cta,
+        // Three fields for one link, because the app needs all three: the
+        // address to launch, the kind to know whether the button dials or
+        // opens a browser, and the readable form to put on it when the sponsor
+        // did not write their own button text. Builds older than the one that
+        // added these read `linkUrl` alone and still work — a `tel:` URI goes
+        // through the same launcher an https one does.
+        linkKind: s.linkKind,
         linkUrl: s.linkUrl,
+        linkText: linkText(s.linkKind, s.linkUrl),
         imageUrl: s.imageUrl,
         accent: s.accent,
         updatedAt: sqlToIso(s.updatedAt),

@@ -7,7 +7,7 @@
  * in, so there is nothing to cache-bust and nothing to keep in sync.
  */
 
-import { Sponsor } from '../sponsor/repo';
+import { linkText, Sponsor } from '../sponsor/repo';
 
 const SHELL = (title: string, body: string): string => `<!doctype html>
 <html lang="en">
@@ -303,9 +303,25 @@ export const consolePage = (opts: {
     when the second line is left empty.
   </div>
 
-  <label for="sp-link">Link <span class="count">optional</span></label>
-  <input id="sp-link" type="text" maxlength="500" value="${escapeHtml(opts.sponsor.linkUrl)}" placeholder="https://…">
-  <div class="hint">Where the button on the full page sends people. No link means no button — the page still shows your image and pitch.</div>
+  <div class="two">
+    <div style="flex: 0 1 170px">
+      <label for="sp-link-kind">Button does</label>
+      <select id="sp-link-kind">
+        <option value="web"${opts.sponsor.linkKind === 'web' ? ' selected' : ''}>Opens a website</option>
+        <option value="phone"${opts.sponsor.linkKind === 'phone' ? ' selected' : ''}>Calls a number</option>
+        <option value="whatsapp"${opts.sponsor.linkKind === 'whatsapp' ? ' selected' : ''}>Opens WhatsApp</option>
+        <option value="email"${opts.sponsor.linkKind === 'email' ? ' selected' : ''}>Writes an email</option>
+      </select>
+    </div>
+    <div>
+      <label for="sp-link"><span id="sp-link-label">Link</span> <span class="count">optional</span></label>
+      <input id="sp-link" type="text" maxlength="500" value="${escapeHtml(
+        linkText(opts.sponsor.linkKind, opts.sponsor.linkUrl),
+      )}" placeholder="https://…">
+    </div>
+  </div>
+  <div class="hint" id="sp-link-hint"></div>
+  <div class="hint">No link means no button — the full page still shows your image and pitch.</div>
 
   <label>Accent</label>
   <div class="row" style="margin-top:6px">
@@ -666,6 +682,7 @@ const sp = {
   enabled: $('sp-enabled'), label: $('sp-label'), brand: $('sp-brand'),
   by: $('sp-by'), pitch: $('sp-pitch'), cta: $('sp-cta'), link: $('sp-link'),
   accent: $('sp-accent'), imageUrl: $('sp-image-url'),
+  linkKind: $('sp-link-kind'),
 };
 const spmsg = $('spmsg'), spLogo = $('sp-logo');
 
@@ -678,6 +695,63 @@ let logoData = null;
 
 count(sp.brand, $('sp-bc'), 60);
 count(sp.pitch, $('sp-pc'), 300);
+
+/**
+ * The four kinds of button, as the operator sees them.
+ *
+ * \`preview\` is deliberately the same shape the server will store — an
+ * operator who can see \`tel:+919876543210\` before saving can also see that
+ * they typed their landline into the WhatsApp box. It is a preview and not the
+ * validator: the server re-derives this from scratch and is the one that says
+ * no, because this script is only what a browser happens to be running.
+ */
+const LINK_KINDS = {
+  web: {
+    label: 'Web address',
+    placeholder: 'https://…',
+    hint: 'A full https:// address.',
+    // Mirrors SponsorDetailScreen._linkLabel in the app, exactly. A preview
+    // that guesses differently from the phone is worse than no preview.
+    fallbackCta: () => 'Visit website',
+    bad: 'The link must be a full https:// address.',
+    preview: (v) => (/^https:\\/\\/[^\\s]+$/i.test(v) ? v : null),
+    text: (url) => url.replace(/^https:\\/\\//i, '').replace(/\\/$/, ''),
+  },
+  phone: {
+    label: 'Phone number',
+    placeholder: '+91 98765 43210',
+    hint: 'Tapping the button opens the dialler with this number in it.',
+    fallbackCta: (text) => 'Call ' + text,
+    bad: 'Give a phone number of 6 to 15 digits.',
+    preview: (v) => {
+      const d = v.replace(/[^0-9]/g, '');
+      if (d.length < 6 || d.length > 15) return null;
+      return 'tel:' + (v.trim().startsWith('+') ? '+' : '') + d;
+    },
+    text: (url) => url.slice(4),
+  },
+  whatsapp: {
+    label: 'WhatsApp number',
+    placeholder: '91 98765 43210',
+    hint: 'With the country code — 91 for India. Without it WhatsApp opens a chat with nobody.',
+    fallbackCta: (text) => 'WhatsApp ' + text,
+    bad: 'Give a WhatsApp number with its country code, like 919876543210.',
+    preview: (v) => {
+      const d = v.replace(/[^0-9]/g, '').replace(/^0+/, '');
+      return d.length >= 11 && d.length <= 15 ? 'https://wa.me/' + d : null;
+    },
+    text: (url) => '+' + url.slice('https://wa.me/'.length),
+  },
+  email: {
+    label: 'Email address',
+    placeholder: 'sales@example.com',
+    hint: 'Tapping the button opens the phone\\'s mail app with this address filled in.',
+    fallbackCta: (text) => text,
+    bad: 'That does not look like an email address.',
+    preview: (v) => (/^[^\\s@,:;<>]+@[^\\s@.,:;<>]+(\\.[^\\s@.,:;<>]+)+$/.test(v.trim()) ? 'mailto:' + v.trim() : null),
+    text: (url) => url.slice(7),
+  },
+};
 
 /** Mirrors the app: text colour read off the fill, not off a fixed palette. */
 function inkOn(hex) {
@@ -703,6 +777,27 @@ function draw() {
     ? sp.cta.value.trim() + ' \\u2192'
     : '\\u2192';
 
+  // The link field is one input wearing four different hats.
+  const kind = LINK_KINDS[sp.linkKind.value] || LINK_KINDS.web;
+  $('sp-link-label').textContent = kind.label;
+  sp.link.placeholder = kind.placeholder;
+  const raw = sp.link.value.trim();
+  const built = raw ? kind.preview(raw) : '';
+  const hint = $('sp-link-hint');
+  if (!raw) {
+    hint.style.color = '';
+    hint.textContent = kind.hint;
+  } else if (built) {
+    hint.style.color = '';
+    // What the button will say when the sponsor left the text box empty, and
+    // what the phone will be handed. Both, because both surprise people.
+    const shown = sp.cta.value.trim() || kind.fallbackCta(kind.text(built));
+    hint.textContent = 'Button reads \\u201c' + shown + '\\u201d and opens ' + built;
+  } else {
+    hint.style.color = 'var(--danger)';
+    hint.textContent = kind.bad;
+  }
+
   const mark = $('sim-mark');
   const img = $('sim-img');
   const src = logoData || sp.imageUrl.value;
@@ -715,7 +810,7 @@ function draw() {
   $('sim-off').hidden = sp.enabled.checked;
 }
 
-for (const f of [sp.enabled, sp.label, sp.brand, sp.by, sp.pitch, sp.cta, sp.link]) {
+for (const f of [sp.enabled, sp.label, sp.brand, sp.by, sp.pitch, sp.cta, sp.link, sp.linkKind]) {
   f.addEventListener('input', draw);
   f.addEventListener('change', draw);
 }
@@ -764,6 +859,7 @@ $('spf').addEventListener('submit', async (e) => {
         byLine: sp.by.value,
         pitch: sp.pitch.value,
         cta: sp.cta.value,
+        linkKind: sp.linkKind.value,
         linkUrl: sp.link.value,
         accent: accentOn ? sp.accent.value : '',
         image: logoData || undefined,

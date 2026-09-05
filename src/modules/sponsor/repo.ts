@@ -33,10 +33,95 @@ export interface Sponsor {
   byLine: string;
   pitch: string;
   cta: string;
+  /** What kind of address [linkUrl] holds. */
+  linkKind: SponsorLinkKind;
+  /** The whole address, scheme and all — `tel:…`, `mailto:…`, an https URL. */
   linkUrl: string;
   imageUrl: string;
   accent: string;
   updatedAt: string;
+}
+
+/**
+ * The four things a sponsor's button can do.
+ *
+ * Kept a closed list rather than "any URI the operator types", because this
+ * string is handed straight to a phone's launcher on every install: an open
+ * field is how `javascript:` and `intent:` get in. Adding a fifth is a one-line
+ * change here, in [LINK_RULES], and in the console's dropdown.
+ */
+export const SPONSOR_LINK_KINDS = ['web', 'phone', 'whatsapp', 'email'] as const;
+export type SponsorLinkKind = (typeof SPONSOR_LINK_KINDS)[number];
+
+/**
+ * Per kind: how to read what the operator typed, and how to write it back out.
+ *
+ * `parse` returns the canonical address or null if the input is not one of
+ * these at all; `display` is the inverse, and is what the app puts on the
+ * button when the sponsor has not written their own text — a number reads
+ * better on a button that dials than the word "Website" does.
+ */
+interface LinkRule {
+  parse(raw: string): string | null;
+  display(url: string): string;
+  message: string;
+}
+
+/** Digits and a leading +, with the spaces, dashes and brackets people type. */
+function digits(raw: string): string {
+  return raw.replace(/[^\d]/g, '');
+}
+
+const LINK_RULES: Record<SponsorLinkKind, LinkRule> = {
+  web: {
+    // Unchanged from when this was the only kind: https only, absolute only.
+    parse: (raw) => (/^https:\/\/[^\s]+$/i.test(raw) ? raw : null),
+    display: (url) => url.replace(/^https:\/\//i, '').replace(/\/$/, ''),
+    message: 'The link must be a full https:// address.',
+  },
+  phone: {
+    // A dialler takes anything, so the only real check is that this is a
+    // number at all. The `+` is kept when it is there — a sponsor who wrote
+    // their country code meant it, and a phone roaming outside India needs it.
+    parse: (raw) => {
+      const d = digits(raw);
+      if (d.length < 6 || d.length > 15) return null;
+      return `tel:${raw.trim().startsWith('+') ? '+' : ''}${d}`;
+    },
+    display: (url) => url.replace(/^tel:/i, ''),
+    message: 'Give a phone number of 6 to 15 digits.',
+  },
+  whatsapp: {
+    // wa.me wants the country code and nothing else — no `+`, no spaces. A
+    // ten-digit Indian number posted as-is opens a chat with nobody and fails
+    // silently on the phone, so it is rejected here instead.
+    parse: (raw) => {
+      const d = digits(raw).replace(/^0+/, '');
+      if (d.length < 11 || d.length > 15) return null;
+      return `https://wa.me/${d}`;
+    },
+    display: (url) => `+${url.replace(/^https:\/\/wa\.me\//i, '')}`,
+    message: 'Give a WhatsApp number with its country code, like 919876543210.',
+  },
+  email: {
+    parse: (raw) => {
+      const v = raw.trim();
+      return /^[^\s@,:;<>]+@[^\s@.,:;<>]+(\.[^\s@.,:;<>]+)+$/.test(v) ? `mailto:${v}` : null;
+    },
+    display: (url) => url.replace(/^mailto:/i, ''),
+    message: 'That does not look like an email address.',
+  },
+};
+
+/**
+ * The address as a person would read it: `98765 43210`, not `tel:9876543210`.
+ *
+ * Computed rather than stored, so the one canonical copy of the link stays the
+ * one the launcher is given.
+ */
+export function linkText(kind: SponsorLinkKind, url: string): string {
+  if (!url) return '';
+  return LINK_RULES[kind].display(url);
 }
 
 /**
@@ -54,16 +139,11 @@ export const SponsorInput = z
     byLine: z.string().trim().max(80).default(''),
     pitch: z.string().trim().max(300).default(''),
     cta: z.string().trim().max(30).default(''),
-    // Only http(s), and only an absolute URL. A `javascript:` or `intent:`
-    // string here would be handed straight to a phone's URL launcher.
-    linkUrl: z
-      .string()
-      .trim()
-      .max(500)
-      .default('')
-      .refine((v) => v === '' || /^https:\/\/[^\s]+$/i.test(v), {
-        message: 'The link must be a full https:// address.',
-      }),
+    linkKind: z.enum(SPONSOR_LINK_KINDS).default('web'),
+    // What the operator typed, in whatever shape suits the kind they picked —
+    // a number with spaces in it, an email address, an https URL. The
+    // transform below is what turns it into the address the app launches.
+    linkUrl: z.string().trim().max(500).default(''),
     imageUrl: z.string().trim().max(500).default(''),
     accent: z
       .string()
@@ -83,7 +163,25 @@ export const SponsorInput = z
         message: 'Give the sponsor a name before switching the card on.',
       });
     }
-  });
+    // Empty is always allowed: no link means no button, which is a card that
+    // just says something. A non-empty one has to be the kind it claims to be,
+    // because nothing downstream looks at it again — the app hands it to the
+    // phone's launcher as it stands.
+    if (v.linkUrl && LINK_RULES[v.linkKind].parse(v.linkUrl) === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['linkUrl'],
+        message: LINK_RULES[v.linkKind].message,
+      });
+    }
+  })
+  // Canonical form is written, never what was typed: `98765 43210` and
+  // `+91 98765-43210` are the same button, and the row should not remember
+  // which day's typing produced it.
+  .transform((v) => ({
+    ...v,
+    linkUrl: v.linkUrl ? (LINK_RULES[v.linkKind].parse(v.linkUrl) ?? '') : '',
+  }));
 
 export type SponsorInputType = z.infer<typeof SponsorInput>;
 
@@ -94,6 +192,7 @@ const EMPTY: Sponsor = {
   byLine: '',
   pitch: '',
   cta: '',
+  linkKind: 'web',
   linkUrl: '',
   imageUrl: '',
   accent: '',
@@ -110,13 +209,14 @@ export async function readSponsor(): Promise<Sponsor> {
     by_line: string;
     pitch: string;
     cta: string;
+    link_kind: string;
     link_url: string;
     image_url: string;
     accent: string;
     updated_at: string;
   }>(
-    `SELECT enabled, label, brand, by_line, pitch, cta, link_url, image_url,
-            accent, updated_at
+    `SELECT enabled, label, brand, by_line, pitch, cta, link_kind, link_url,
+            image_url, accent, updated_at
        FROM app_sponsor WHERE id = 1`,
   );
   const r = rows[0];
@@ -130,6 +230,11 @@ export async function readSponsor(): Promise<Sponsor> {
     byLine: r.by_line,
     pitch: r.pitch,
     cta: r.cta,
+    // The column is CHECK-constrained, so this only falls back for a row
+    // written by hand. 'web' is what every pre-0002 row meant.
+    linkKind: (SPONSOR_LINK_KINDS as readonly string[]).includes(r.link_kind)
+      ? (r.link_kind as SponsorLinkKind)
+      : 'web',
     linkUrl: r.link_url,
     imageUrl: r.image_url,
     accent: r.accent,
@@ -145,13 +250,14 @@ export async function writeSponsor(input: SponsorInputType): Promise<void> {
   // console that breaks on the next fresh environment.
   await q(
     `INSERT INTO app_sponsor
-       (id, enabled, label, brand, by_line, pitch, cta, link_url, image_url, accent)
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, enabled, label, brand, by_line, pitch, cta, link_kind, link_url,
+        image_url, accent)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET
        enabled = excluded.enabled, label = excluded.label, brand = excluded.brand,
        by_line = excluded.by_line, pitch = excluded.pitch, cta = excluded.cta,
-       link_url = excluded.link_url, image_url = excluded.image_url,
-       accent = excluded.accent`,
+       link_kind = excluded.link_kind, link_url = excluded.link_url,
+       image_url = excluded.image_url, accent = excluded.accent`,
     [
       input.enabled ? 1 : 0,
       input.label,
@@ -159,6 +265,7 @@ export async function writeSponsor(input: SponsorInputType): Promise<void> {
       input.byLine,
       input.pitch,
       input.cta,
+      input.linkKind,
       input.linkUrl,
       input.imageUrl,
       input.accent,

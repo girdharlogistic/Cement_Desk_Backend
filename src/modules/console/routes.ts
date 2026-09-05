@@ -18,7 +18,7 @@ import { getConfig } from '../../config';
 import { errors } from '../../lib/errors';
 import { enforceLimit } from '../../lib/limiter';
 import { verifyPassword, DUMMY_HASH_PROMISE } from '../../lib/passwords';
-import { readSponsor, writeSponsor, SponsorInput } from '../sponsor/repo';
+import { readSponsor, writeSponsor, SponsorInput, SPONSOR_LINK_KINDS } from '../sponsor/repo';
 import { sendToTopic } from './fcm';
 import { readStored, storeDataUrl } from './media';
 import { consolePage, loginPage } from './page';
@@ -128,6 +128,7 @@ const SponsorSchema = z.object({
   byLine: z.string().max(160).optional(),
   pitch: z.string().max(600).optional(),
   cta: z.string().max(60).optional(),
+  linkKind: z.enum(SPONSOR_LINK_KINDS).optional(),
   linkUrl: z.string().max(600).optional(),
   accent: z.string().max(16).optional(),
   /** A new upload. Absent means "keep [imageUrl]". */
@@ -298,6 +299,7 @@ export function registerConsoleRoutes(app: FastifyInstance): void {
         byLine: b.byLine ?? '',
         pitch: b.pitch ?? '',
         cta: b.cta ?? '',
+        linkKind: b.linkKind ?? 'web',
         linkUrl: b.linkUrl ?? '',
         accent: b.accent ?? '',
         imageUrl: stored ? stored.url : (b.imageUrl ?? ''),
@@ -312,6 +314,7 @@ export function registerConsoleRoutes(app: FastifyInstance): void {
           operator,
           enabled: parsed.data.enabled,
           brand: parsed.data.brand,
+          linkKind: parsed.data.linkKind,
           newImage: Boolean(stored),
         },
         'console sponsor saved',

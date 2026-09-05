@@ -218,6 +218,18 @@ every fifth foreground, a 300×250 on More, and a rewarded unit
 hero "native" slot is not AdMob — it is the first-party sponsor card served by
 this repo's `/app/sponsor`.
 
+That card's button is not always a website. The console picks a **link kind** —
+`web`, `phone`, `whatsapp`, `email` — and the server stores the canonical URI in
+`app_sponsor.link_url` (`https://…`, `tel:+91…`, `https://wa.me/91…`,
+`mailto:…`); `/app/sponsor` sends `linkKind` and a readable `linkText` beside it
+so the app can label the button "Call +919876543210" rather than "Visit
+website". The kinds are a closed list in `modules/sponsor/repo.ts` on purpose:
+this string is handed straight to a phone's launcher on every install, and an
+open field is how `javascript:` and `intent:` get in. Adding a fifth means
+`SPONSOR_LINK_KINDS`, `LINK_RULES`, the console dropdown, and the app's
+`SponsorLinkKind` — plus a `<queries>` entry in the app's manifest if the new
+scheme is one Android hides behind package visibility.
+
 `AdIds.useTestIds` has been flipped on and off repeatedly during development.
 **It must be `false` in any release** or the build earns nothing — and `false`
 means real ads, so `testDeviceIds` (still empty) should be filled before anyone
