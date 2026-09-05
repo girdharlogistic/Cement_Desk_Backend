@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { tx } from '../../db/pool';
+import { tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey, AppError } from '../../lib/errors';
 import { isUuid, newId } from '../../lib/ids';
 import { parseBusinessDate } from '../../lib/dates';
@@ -7,7 +6,7 @@ import { num } from '../../lib/num';
 import { validateFreightEntry, validatePurchase, validateClaim, validateScheme, FreightInput } from '../../lib/validators';
 import { MASTER_DEFS } from '../masters/routes';
 import { deleteWithCascade, softDeleteRow } from '../masters/service';
-import { mapFreightEntry, compactSerialsAfterDelete } from '../freight/service';
+import { allocateSerial, mapFreightEntry, compactSerialsAfterDelete } from '../freight/service';
 import { mapPurchase } from '../landing/purchases';
 import { normalizeGradeIds, legacyGradeId } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
@@ -34,7 +33,7 @@ export interface PushOutcome {
 }
 
 interface Ctx {
-  c: PoolConnection;
+  c: Q;
   firmId: string;
   userId: string;
 }
@@ -114,7 +113,7 @@ async function masterUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const parsed = def.createSchema.partial().strip().safeParse(m.data ?? {});
   if (!parsed.success) return reject(m, 'VALIDATION_FAILED', parsed.error.issues.map((i: any) => i.message).join('; '));
   const cols = def.toCols(parsed.data);
-  const [rows] = await ctx.c.query(`SELECT id, rev, deleted_at FROM ${def.table} WHERE firm_id = ? AND id = ? FOR UPDATE`, [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query(`SELECT id, rev, deleted_at FROM ${def.table} WHERE firm_id = ? AND id = ?`, [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing) {
     if (!(parsed.data as any).name) return reject(m, 'VALIDATION_FAILED', 'name is required for new records');
@@ -162,7 +161,7 @@ async function routeUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const distanceKm = num(m.data?.distanceKm);
   const revenuePerBag = num(m.data?.revenuePerBag);
   const [rows] = await ctx.c.query(
-    'SELECT id, rev, deleted_at FROM party_routes WHERE firm_id = ? AND party_id = ? AND location_id = ? FOR UPDATE',
+    'SELECT id, rev, deleted_at FROM party_routes WHERE firm_id = ? AND party_id = ? AND location_id = ?',
     [ctx.firmId, pair.partyId, pair.locationId],
   );
   const existing = (rows as any[])[0];
@@ -199,7 +198,7 @@ async function routeDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
 async function freightUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
   const d = m.data ?? {};
-  const [rows] = await ctx.c.query('SELECT * FROM freight_entries WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM freight_entries WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
 
   if (!existing) {
@@ -218,12 +217,7 @@ async function freightUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       return reject(m, e.code ?? 'VALIDATION_FAILED', e.message);
     }
     // §5.1 server-authoritative serial for entries created offline.
-    const [u]: any = await ctx.c.query(
-      'UPDATE firm_counters SET freight_serial = LAST_INSERT_ID(freight_serial + 1) WHERE firm_id = ?', [ctx.firmId]);
-    if (u.affectedRows === 0) {
-      await ctx.c.query('INSERT INTO firm_counters (firm_id, freight_serial) VALUES (?, LAST_INSERT_ID(1))', [ctx.firmId]);
-    }
-    const serial = Number(((await ctx.c.query('SELECT LAST_INSERT_ID() AS s'))[0] as any[])[0].s);
+    const serial = await allocateSerial(ctx.c, ctx.firmId);
     await ctx.c.query(
       `INSERT INTO freight_entries (firm_id, id, serial, date, party_id, location_id, vehicle_no, revenue_per_bag, bags,
          total_reimbursed, basis, cost_rate, cost_units, other_expenses, other_note, total_cost, profit, updated_by)
@@ -281,7 +275,7 @@ async function gradeBagsForConn(ctx: Ctx, entryIds: string[]): Promise<Record<st
   return out;
 }
 
-async function writeGradeBags(c: PoolConnection, firmId: string, entryId: string, gb: Record<string, number>): Promise<void> {
+async function writeGradeBags(c: Q, firmId: string, entryId: string, gb: Record<string, number>): Promise<void> {
   await c.query('DELETE FROM freight_entry_grades WHERE firm_id = ? AND entry_id = ?', [firmId, entryId]);
   for (const [g, b] of Object.entries(gb)) {
     await c.query('INSERT INTO freight_entry_grades (firm_id, entry_id, grade_id, bags) VALUES (?,?,?,?)', [firmId, entryId, g, b]);
@@ -289,7 +283,7 @@ async function writeGradeBags(c: PoolConnection, firmId: string, entryId: string
 }
 
 async function freightDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
-  const [rows] = await ctx.c.query('SELECT * FROM freight_entries WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM freight_entries WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing || existing.deleted_at) return applied(m, m.rev ?? 0);
   if (m.rev === undefined || m.rev !== Number(existing.rev)) {
@@ -313,10 +307,10 @@ function stockDayDate(m: Mutation): string | null {
 async function stockDayUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const date = stockDayDate(m);
   if (!date) return reject(m, 'VALIDATION_FAILED', 'stockDays upsert needs a valid date');
-  const baseline = (await ctx.c.query('SELECT date FROM opening_baselines WHERE firm_id = ? AND deleted_at IS NULL FOR UPDATE', [ctx.firmId]))[0] as any[];
+  const baseline = (await ctx.c.query('SELECT date FROM opening_baselines WHERE firm_id = ? AND deleted_at IS NULL', [ctx.firmId]))[0] as any[];
   if (!baseline.length || date <= baseline[0].date) return reject(m, 'DAY_BEFORE_BASELINE', 'Stock day must be after the baseline date');
 
-  const [found] = await ctx.c.query('SELECT * FROM stock_days WHERE firm_id = ? AND date = ? FOR UPDATE', [ctx.firmId, date]);
+  const [found] = await ctx.c.query('SELECT * FROM stock_days WHERE firm_id = ? AND date = ?', [ctx.firmId, date]);
   let day = (found as any[])[0];
   if (!day) {
     const id = newId();
@@ -334,7 +328,9 @@ async function stockDayUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
     if (!isUuid(r.id) || !isUuid(r.gradeId)) return reject(m, 'VALIDATION_FAILED', 'receipt needs id + gradeId');
     await ctx.c.query(
       `INSERT INTO stock_receipts (firm_id, id, stock_day_id, grade_id, qty, sap_qty, ref) VALUES (?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE grade_id = VALUES(grade_id), qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET
+         grade_id = excluded.grade_id, qty = excluded.qty,
+         sap_qty = excluded.sap_qty, ref = excluded.ref`,
       [ctx.firmId, r.id, day.id, r.gradeId, num(r.qty), num(r.sapQty), String(r.ref ?? '')],
     );
   }
@@ -349,7 +345,8 @@ async function stockDayUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       } else {
         await ctx.c.query(
           `INSERT INTO stock_day_cells (firm_id, stock_day_id, party_id, grade_id, billing, dispatch) VALUES (?,?,?,?,?,?)
-           ON DUPLICATE KEY UPDATE billing = VALUES(billing), dispatch = VALUES(dispatch)`,
+           ON CONFLICT (firm_id, stock_day_id, party_id, grade_id) DO UPDATE SET
+             billing = excluded.billing, dispatch = excluded.dispatch`,
           [ctx.firmId, day.id, partyId, gradeId, billing, dispatch],
         );
       }
@@ -387,7 +384,7 @@ async function baselineUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const d = m.data ?? {};
   const date = parseBusinessDate(d.date);
   if (!date) return reject(m, 'VALIDATION_FAILED', 'baseline needs a valid date');
-  const [found] = await ctx.c.query('SELECT * FROM opening_baselines WHERE firm_id = ? FOR UPDATE', [ctx.firmId]);
+  const [found] = await ctx.c.query('SELECT * FROM opening_baselines WHERE firm_id = ?', [ctx.firmId]);
   const existing = (found as any[])[0];
   if (existing && m.rev !== undefined && m.rev !== Number(existing.rev)) {
     const inv = await ctx.c.query('SELECT COUNT(*) AS n FROM stock_days WHERE firm_id = ? AND deleted_at IS NULL AND date <= ?', [ctx.firmId, date]);
@@ -422,7 +419,7 @@ async function baselineUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
 async function purchaseUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
   const d = m.data ?? {};
-  const [rows] = await ctx.c.query('SELECT * FROM purchases WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM purchases WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   const date = d.date ? parseBusinessDate(d.date) : existing?.date;
   if (!date) return reject(m, 'VALIDATION_FAILED', 'invalid date');
@@ -475,7 +472,7 @@ async function upsertPaymentRow(ctx: Ctx, purchaseId: string, id: string, date: 
   if (!date) throw errors.validation('payment needs a valid date');
   await ctx.c.query(
     `INSERT INTO purchase_payments (firm_id, id, purchase_id, date, amount) VALUES (?,?,?,?,?)
-     ON DUPLICATE KEY UPDATE date = VALUES(date), amount = VALUES(amount)`,
+     ON CONFLICT (firm_id, id) DO UPDATE SET date = excluded.date, amount = excluded.amount`,
     [ctx.firmId, id, purchaseId, date, amount],
   );
 }
@@ -483,7 +480,7 @@ async function upsertPaymentRow(ctx: Ctx, purchaseId: string, id: string, date: 
 async function paymentUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const purchaseId = m.data?.purchaseId;
   if (!isUuid(m.id) || !isUuid(purchaseId)) return reject(m, 'BAD_ID', 'payment upsert needs id + purchaseId');
-  const [rows] = await ctx.c.query('SELECT id, deleted_at FROM purchases WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, purchaseId]);
+  const [rows] = await ctx.c.query('SELECT id, deleted_at FROM purchases WHERE firm_id = ? AND id = ?', [ctx.firmId, purchaseId]);
   const existing = (rows as any[])[0];
   if (!existing || existing.deleted_at) return reject(m, 'NOT_FOUND', 'Purchase not found');
   await upsertPaymentRow(ctx, purchaseId, m.id, parseBusinessDate(m.data?.date), num(m.data?.amount));
@@ -500,7 +497,7 @@ async function paymentDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
 }
 
 async function purchaseDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
-  const [rows] = await ctx.c.query('SELECT * FROM purchases WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM purchases WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing || existing.deleted_at) return applied(m, m.rev ?? 0);
   if (m.rev === undefined || m.rev !== Number(existing.rev)) {
@@ -544,7 +541,7 @@ async function schemeUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
     // lands unfiled instead, which is where that delete would have put it.
     if (!(f as any[]).length) folderId = null;
   }
-  const [rows] = await ctx.c.query('SELECT * FROM schemes WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM schemes WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing) {
     if (!d.name) return reject(m, 'VALIDATION_FAILED', 'scheme needs name');
@@ -609,7 +606,7 @@ async function claimUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   } catch (e: any) {
     return reject(m, e.code ?? 'VALIDATION_FAILED', e.message);
   }
-  const [rows] = await ctx.c.query('SELECT * FROM claims WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM claims WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing) {
     if (!isUuid(d.schemeId) || !isUuid(d.companyId)) return reject(m, 'VALIDATION_FAILED', 'claim needs schemeId/companyId');
@@ -666,7 +663,8 @@ async function upsertNoteRow(ctx: Ctx, claimId: string, id: string, date: string
   if (!date) throw errors.validation('credit note needs a valid date');
   await ctx.c.query(
     `INSERT INTO claim_credit_notes (firm_id, id, claim_id, date, number, amount) VALUES (?,?,?,?,?,?)
-     ON DUPLICATE KEY UPDATE date = VALUES(date), number = VALUES(number), amount = VALUES(amount)`,
+     ON CONFLICT (firm_id, id) DO UPDATE SET
+       date = excluded.date, number = excluded.number, amount = excluded.amount`,
     [ctx.firmId, id, claimId, date, number, amount],
   );
 }
@@ -687,7 +685,7 @@ async function applyAutoStatus(ctx: Ctx, claimId: string): Promise<void> {
 async function creditNoteUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const claimId = m.data?.claimId;
   if (!isUuid(m.id) || !isUuid(claimId)) return reject(m, 'BAD_ID', 'credit note upsert needs id + claimId');
-  const [rows] = await ctx.c.query('SELECT deleted_at FROM claims WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, claimId]);
+  const [rows] = await ctx.c.query('SELECT deleted_at FROM claims WHERE firm_id = ? AND id = ?', [ctx.firmId, claimId]);
   const existing = (rows as any[])[0];
   if (!existing || existing.deleted_at) return reject(m, 'NOT_FOUND', 'Claim not found');
   await upsertNoteRow(ctx, claimId, m.id, parseBusinessDate(m.data?.date), String(m.data?.number ?? ''), num(m.data?.amount));
@@ -706,7 +704,7 @@ async function creditNoteDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
 }
 
 async function claimDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
-  const [rows] = await ctx.c.query('SELECT * FROM claims WHERE firm_id = ? AND id = ? FOR UPDATE', [ctx.firmId, m.id]);
+  const [rows] = await ctx.c.query('SELECT * FROM claims WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
   if (!existing || existing.deleted_at) return applied(m, m.rev ?? 0);
   if (m.rev === undefined || m.rev !== Number(existing.rev)) {

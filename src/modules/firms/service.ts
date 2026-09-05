@@ -1,6 +1,5 @@
-import { PoolConnection } from 'mysql2/promise';
 import { invalidateFirm } from '../../lib/caches';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { sqlToIso } from '../../lib/dates';
@@ -31,7 +30,7 @@ export function mapFirm(r: any, role?: Role): FirmWire {
 
 /** Create firm + owner membership + serial counter in one transaction (§8.2/§8.3). */
 export async function createFirmTx(
-  c: PoolConnection,
+  c: Q,
   ownerUserId: string,
   name: string,
   fyStartMonth: number,
@@ -170,7 +169,7 @@ export async function inviteMember(
   const id = newId();
   await q(
     `INSERT INTO auth_tokens (id, user_id, email_norm, purpose, token_hash, payload, expires_at)
-     VALUES (?,?,?,?,?,CAST(? AS JSON),?)`,
+     VALUES (?,?,?,?,?,?,?)`,
     [id, null, emailNorm, 'firm_invite', raw.hash, JSON.stringify({ firmId, role, invitedBy: inviterUserId }), addSecondsSql(new Date(), 7 * 24 * 3600)],
   );
   await sendMail(email, 'You were invited to a Cement Desk firm', `Invite token: ${raw.token}`);
@@ -181,7 +180,7 @@ export async function acceptInvite(userId: string, rawToken: string): Promise<Fi
   const hash = sha256Hex(rawToken);
   return tx(async (c) => {
     const [rows] = await c.query(
-      "SELECT * FROM auth_tokens WHERE token_hash = ? AND purpose = 'firm_invite' FOR UPDATE",
+      "SELECT * FROM auth_tokens WHERE token_hash = ? AND purpose = 'firm_invite'",
       [hash],
     );
     const tok = (rows as any[])[0];
@@ -198,7 +197,7 @@ export async function acceptInvite(userId: string, rawToken: string): Promise<Fi
     const [frows] = await c.query('SELECT * FROM firms WHERE id = ? AND deleted_at IS NULL', [firmId]);
     const firm = (frows as any[])[0];
     if (!firm) throw errors.notFound('Firm not found');
-    await c.query('INSERT IGNORE INTO firm_members (firm_id, user_id, role) VALUES (?,?,?)', [firmId, userId, role]);
+    await c.query('INSERT OR IGNORE INTO firm_members (firm_id, user_id, role) VALUES (?,?,?)', [firmId, userId, role]);
     await c.query('UPDATE auth_tokens SET used_at = UTC_TIMESTAMP(3) WHERE id = ?', [tok.id]);
     // Inside the transaction here because the value being invalidated is a
     // *negative* one — "this user is not a member" — and leaving that cached
@@ -208,7 +207,7 @@ export async function acceptInvite(userId: string, rawToken: string): Promise<Fi
   });
 }
 
-async function ownerCount(c: PoolConnection, firmId: string): Promise<number> {
+async function ownerCount(c: Q, firmId: string): Promise<number> {
   const [rows] = await c.query("SELECT COUNT(*) AS n FROM firm_members WHERE firm_id = ? AND role = 'owner'", [firmId]);
   return Number((rows as any[])[0].n);
 }
@@ -220,7 +219,7 @@ export async function patchMemberRole(
   role: Role,
 ): Promise<void> {
   await tx(async (c) => {
-    const [rows] = await c.query('SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ? FOR UPDATE', [
+    const [rows] = await c.query('SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ?', [
       firmId,
       targetUserId,
     ]);
@@ -240,7 +239,7 @@ export async function patchMemberRole(
 
 export async function removeMember(actorRole: Role, actorUserId: string, firmId: string, targetUserId: string): Promise<void> {
   await tx(async (c) => {
-    const [rows] = await c.query('SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ? FOR UPDATE', [
+    const [rows] = await c.query('SELECT role FROM firm_members WHERE firm_id = ? AND user_id = ?', [
       firmId,
       targetUserId,
     ]);

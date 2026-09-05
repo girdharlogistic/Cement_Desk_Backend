@@ -5,9 +5,15 @@ The cloud API for the **Cement Desk** Android app
 cement dealer back office (freight, stock reconciliation, scheme/landing-cost
 accounting).
 
-Stack: **Node ≥ 20.12 · TypeScript · Fastify 5 · mysql2 → TiDB Cloud
-Serverless (MySQL wire) · zod · jose JWT · argon2id · nodemailer**.
-Hand-written SQL migrations; no ORM. CommonJS, runs from `dist/`.
+Stack: **Node ≥ 22 · TypeScript · Fastify 5 · `node:sqlite` · zod · jose JWT ·
+argon2id · nodemailer**. Hand-written SQL migrations; no ORM. CommonJS, runs
+from `dist/`.
+
+The database is a single SQLite file on the same host (`SQLITE_PATH`). It was
+TiDB Cloud Serverless until 2026-09-05; the free tier's limits had become the
+binding constraint on a dataset of a few thousand rows, and a file on the API's
+own disk removes both the quota and the 63 ms round trip. `scripts/migrate_tidb_to_sqlite.ts`
+is the one-off that moved the data, kept as the record of how.
 
 Public endpoints (behind a Cloudflare tunnel):
 
@@ -60,20 +66,27 @@ src/
                · backup · plans · billing · sponsor · console · site
                · account · ads_txt
   jobs/        purge (tombstones/sessions/tokens, every 6 h)
-migrations/    0001–0008, run at boot in filename order
-test/          unit (always) + integration (needs TEST_DATABASE_URL)
+migrations-sqlite/  live schema, run at boot in filename order
+migrations/         the old TiDB files, kept as history — nothing reads them
+test/          unit + integration (both always run; the suite makes its own
+               throwaway database file)
 ```
 
 ## Develop, build, test
 
 ```bash
-cp .env.example .env    # fill in TiDB + JWT_SECRET (+ SMTP, Play, console…)
+cp .env.example .env    # fill in JWT_SECRET (+ SMTP, Play, console…)
 npm ci
 npm run dev             # tsx watch, hot reload
 npm run build           # tsc → dist/
-npm test                # 72 unit tests (integration skips without TEST_DATABASE_URL)
-npm run test:integration   # full suite against a scratch MySQL/TiDB database
+npm test                # 90 tests: 72 unit + 18 integration
+npm run test:integration   # end-to-end, on a temp SQLite file it creates itself
+npm run backup          # VACUUM INTO a snapshot right now
 ```
+
+There is no database to install or point at. The integration suite used to be
+gated on `TEST_DATABASE_URL` reaching a live TiDB, which meant in practice it
+never ran; it now makes its own file per run and is part of `npm test`.
 
 `config.ts` is the single list of environment variables (zod-validated,
 fail-fast at boot). The service loads `.env` itself — do **not** move that to

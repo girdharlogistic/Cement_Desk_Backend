@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { num } from '../../lib/num';
@@ -42,7 +41,7 @@ export async function getDayRow(firmId: string, date: string): Promise<any | nul
   return qOne('SELECT * FROM stock_days WHERE firm_id = ? AND date = ? AND deleted_at IS NULL', [firmId, date]);
 }
 
-export async function fetchDayByRow(c: PoolConnection, row: any): Promise<any> {
+export async function fetchDayByRow(c: Q, row: any): Promise<any> {
   const [receiptsRes, cellsRes] = await Promise.all([
     c.query('SELECT * FROM stock_receipts WHERE firm_id = ? AND stock_day_id = ?', [row.firm_id, row.id]),
     c.query('SELECT * FROM stock_day_cells WHERE firm_id = ? AND stock_day_id = ?', [row.firm_id, row.id]),
@@ -88,7 +87,7 @@ export async function putBaseline(
   }
 
   const header = await tx(async (c) => {
-    const [existing] = await c.query('SELECT firm_id, deleted_at FROM opening_baselines WHERE firm_id = ? FOR UPDATE', [firmId]);
+    const [existing] = await c.query('SELECT firm_id, deleted_at FROM opening_baselines WHERE firm_id = ?', [firmId]);
     if ((existing as any[]).length) {
       await c.query(
         'UPDATE opening_baselines SET date = ?, deleted_at = NULL, rev = rev + 1, updated_by = ? WHERE firm_id = ?',
@@ -130,7 +129,7 @@ export async function createStockDay(firmId: string, userId: string, date: strin
   if (live) throw errors.stockDayExists();
 
   return tx(async (c) => {
-    const [tomb] = await c.query('SELECT id FROM stock_days WHERE firm_id = ? AND date = ? AND deleted_at IS NOT NULL FOR UPDATE', [firmId, date]);
+    const [tomb] = await c.query('SELECT id FROM stock_days WHERE firm_id = ? AND date = ? AND deleted_at IS NOT NULL', [firmId, date]);
     let row: any;
     if ((tomb as any[]).length) {
       // Resurrect the tombstoned sheet in place (§6.3b).
@@ -176,7 +175,7 @@ export async function listStockDays(firmId: string, from?: string, to?: string):
   );
 }
 
-async function bumpDay(c: PoolConnection, firmId: string, dayId: string, userId: string): Promise<void> {
+async function bumpDay(c: Q, firmId: string, dayId: string, userId: string): Promise<void> {
   await c.query('UPDATE stock_days SET rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?', [userId, firmId, dayId]);
 }
 
@@ -199,7 +198,8 @@ export async function putCell(
       await c.query(
         `INSERT INTO stock_day_cells (firm_id, stock_day_id, party_id, grade_id, billing, dispatch)
          VALUES (?,?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE billing = VALUES(billing), dispatch = VALUES(dispatch)`,
+         ON CONFLICT (firm_id, stock_day_id, party_id, grade_id) DO UPDATE SET
+           billing = excluded.billing, dispatch = excluded.dispatch`,
         [firmId, day.id, cell.partyId, cell.gradeId, cell.billing, cell.dispatch],
       );
     }
@@ -241,7 +241,9 @@ export async function addReceipt(
     await c.query(
       `INSERT INTO stock_receipts (firm_id, id, stock_day_id, grade_id, qty, sap_qty, ref)
        VALUES (?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE grade_id = VALUES(grade_id), qty = VALUES(qty), sap_qty = VALUES(sap_qty), ref = VALUES(ref)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET
+         grade_id = excluded.grade_id, qty = excluded.qty,
+         sap_qty = excluded.sap_qty, ref = excluded.ref`,
       [firmId, id, day.id, r.gradeId, r.qty, r.sapQty, r.ref],
     );
     await bumpDay(c, firmId, day.id, userId);

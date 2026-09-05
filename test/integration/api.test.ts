@@ -1,16 +1,19 @@
 /**
- * Integration suite (§15.2/§15.3). Runs ONLY when TEST_DATABASE_URL points at a
- * reachable TiDB/MySQL server, e.g.
- *   TEST_DATABASE_URL="mysql://root@127.0.0.1:4000/cement_desk_test" npm run test:integration
- * The suite creates its own schema content (database from the URL) and is
- * sequential by design: state carries across steps within each firm.
+ * Integration suite (§15.2/§15.3). Sequential by design: state carries across
+ * steps within each firm.
  *
- * Per spec §15.2 these should run against a real TiDB, not a MySQL stand-in.
+ * This used to be gated on TEST_DATABASE_URL pointing at a reachable TiDB, and
+ * so in practice it almost never ran — which is exactly the wrong property for
+ * the only tests that exercise the SQL rather than the pure functions around
+ * it. The database is a file now, so the suite makes its own in a temp
+ * directory on every run and deletes it afterwards. No gate, no setup.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-const URL = process.env.TEST_DATABASE_URL;
-const SKIP = !URL;
+let tmpDir = '';
 
 let app: any;
 let closePool: () => Promise<void>;
@@ -20,6 +23,7 @@ const U = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}
 
 let tokensA: { accessToken: string; refreshToken: string } = { accessToken: '', refreshToken: '' };
 let firmA = '';
+let ownerEmail = '';
 let partyA = U(101), locA = U(102), gradeA = U(103), gradeB = U(104), companyA = U(105), sourceA = U(106);
 
 async function api(method: string, path: string, body?: any, token?: string, headers: Record<string, string> = {}) {
@@ -42,19 +46,44 @@ async function api(method: string, path: string, body?: any, token?: string, hea
 }
 
 const DAY = '2026-08-14';
+const PASSWORD = 'password-123';
 const email = (tag: string) => `test-${tag}-${Date.now()}@example.com`;
 
+/**
+ * Sign up, then put the account past the email gate.
+ *
+ * Every route outside /auth is behind `authenticateVerified`, so without this
+ * the whole suite would be testing the 403 and nothing else. The flag is
+ * flipped in the database rather than by entering a code because the OTP is
+ * stored salted and hashed — there is nothing to read back — and the code path
+ * that generates and checks it has its own unit tests (test/unit/otp.test.ts).
+ *
+ * The fresh login afterwards is not incidental: the verified flag is read once
+ * per session and cached for twenty seconds, so the tokens minted at signup
+ * still say "unverified".
+ */
+async function signUpVerified(tag: string, extra: Record<string, unknown> = {}) {
+  const addr = email(tag);
+  const res = await api('POST', '/auth/signup', { email: addr, password: PASSWORD, ...extra });
+  expect(res.status).toBe(201);
+
+  const { q } = await import('../../src/db/pool');
+  await q('UPDATE users SET email_verified = 1 WHERE email_norm = ?', [addr.toLowerCase()]);
+
+  const lg = await api('POST', '/auth/login', { email: addr, password: PASSWORD });
+  expect(lg.status).toBe(200);
+  return { email: addr, user: res.body.user, firm: res.body.firm, tokens: lg.body.tokens };
+}
+
 beforeAll(async () => {
-  if (SKIP) return;
-  const u = new globalThis.URL(URL!);
-  process.env.TIDB_HOST = u.hostname;
-  process.env.TIDB_PORT = u.port || '4000';
-  process.env.TIDB_USER = decodeURIComponent(u.username);
-  process.env.TIDB_PASSWORD = decodeURIComponent(u.password);
-  process.env.TIDB_DATABASE = u.pathname.replace(/^\//, '') || 'cement_desk_test';
-  process.env.TIDB_TLS = u.searchParams.get('tls') === 'true' ? 'true' : 'false';
+  tmpDir = mkdtempSync(join(tmpdir(), 'cementdesk-test-'));
+  process.env.SQLITE_PATH = join(tmpDir, 'test.db');
   process.env.JWT_SECRET = 'test-secret-test-secret-test-secret-0123456789';
   process.env.LOG_LEVEL = 'error';
+  // Cheap hashing: this suite creates a dozen accounts and the default argon2
+  // cost turns that into most of the runtime.
+  process.env.ARGON2_MEMORY_KB = '8192';
+  process.env.ARGON2_ITERATIONS = '1';
 
   const migrate = await import('../../src/db/migrate');
   await migrate.runMigrations();
@@ -64,27 +93,26 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  if (SKIP) return;
   if (app) await app.close();
   if (closePool) await closePool();
+  if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe.skipIf(SKIP)('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
+describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
   it('signup with firmName creates user+firm+counter atomically (§8.2)', async () => {
-    const { status, body } = await api('POST', '/auth/signup', {
-      email: email('owner'),
-      password: 'password-123',
-      displayName: 'Owner A',
-      firmName: 'Sharma Traders',
-    });
-    expect(status).toBe(201);
-    expect(body.user.email).toContain('test-owner');
-    expect(body.firm.name).toBe('Sharma Traders');
-    expect(body.firm.role).toBe('owner');
-    expect(body.firm.fyStartMonth).toBe(4); // §D1 default April
-    expect(body.tokens.accessToken).toBeTruthy();
-    firmA = body.firm.id;
-    tokensA = body.tokens;
+    const a = await signUpVerified('owner', { displayName: 'Owner A', firmName: 'Sharma Traders' });
+    expect(a.user.email).toContain('test-owner');
+    expect(a.firm.name).toBe('Sharma Traders');
+    expect(a.firm.role).toBe('owner');
+    expect(a.firm.fyStartMonth).toBe(4); // §D1 default April
+    expect(a.tokens.accessToken).toBeTruthy();
+    // The counter row is created in the same transaction as the firm.
+    const { qOne } = await import('../../src/db/pool');
+    const counter = await qOne<any>('SELECT freight_serial FROM firm_counters WHERE firm_id = ?', [a.firm.id]);
+    expect(Number(counter.freight_serial)).toBe(0);
+    firmA = a.firm.id;
+    tokensA = a.tokens;
+    ownerEmail = a.email;
   });
 
   it('login → me → refresh rotation works; revoked refresh is rejected (§7.2)', async () => {
@@ -96,23 +124,27 @@ describe.skipIf(SKIP)('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', 
     expect(r1.status).toBe(200);
     const rotated = r1.body.tokens.refreshToken;
     expect(rotated).not.toBe(tokensA.refreshToken);
-    // old token is now revoked → reuse → reuse detection nukes ALL sessions
+
+    // Replaying the old token inside the rotation grace window returns the
+    // session it was rotated into, rather than treating it as theft. That
+    // window exists because a dropped refresh response would otherwise log a
+    // phone out through no fault of its own (migration 0005).
     const r2 = await api('POST', '/auth/refresh', { refreshToken: tokensA.refreshToken });
-    expect(r2.status).toBe(401);
-    expect(['TOKEN_REVOKED', 'UNAUTHENTICATED']).toContain(r2.body.error.code);
-    // rotated token got nuked too (reuse detection revokes everything)
+    expect(r2.status).toBe(200);
+
+    // The rotated token is the live one and keeps working.
     const r3 = await api('POST', '/auth/refresh', { refreshToken: rotated });
-    expect(r3.status).toBe(401);
+    expect(r3.status).toBe(200);
+
     // log in again to continue the suite
-    const lg = await api('POST', '/auth/login', { email: me.body.user.email, password: 'password-123' });
+    const lg = await api('POST', '/auth/login', { email: ownerEmail, password: PASSWORD });
     expect(lg.status).toBe(200);
     tokensA = lg.body.tokens;
   });
 
   it('tenancy: a non-member user gets 403 NOT_A_FIRM_MEMBER on every tenant route (§7.3)', async () => {
-    const b = await api('POST', '/auth/signup', { email: email('outsider'), password: 'password-123', displayName: 'B' });
-    expect(b.status).toBe(201);
-    const tokenB = b.body.tokens.accessToken;
+    const b = await signUpVerified('outsider', { displayName: 'B' });
+    const tokenB = b.tokens.accessToken;
     for (const path of [
       `/firms/${firmA}/parties`,
       `/firms/${firmA}/freight-entries`,
@@ -490,16 +522,16 @@ describe.skipIf(SKIP)('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', 
     const f = await api('POST', '/firms', { name: `Members-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;
     const tok = tokensA.accessToken;
-    const bUser = await api('POST', '/auth/signup', { email: email('member'), password: 'password-123', displayName: 'Member B', firmName: 'B Firm' });
-    const tokB = bUser.body.tokens.accessToken;
-    const emailB = bUser.body.user.email;
+    const bUser = await signUpVerified('member', { displayName: 'Member B', firmName: 'B Firm' });
+    const tokB = bUser.tokens.accessToken;
+    const emailB = bUser.email;
     const inv = await api('POST', `/firms/${fid}/members/invite`, { email: emailB, role: 'member' }, tok);
     expect(inv.status).toBe(201);
     expect(inv.body.inviteId).toBeTruthy();
     // accept needs the token from the invite mail — grab it from the DB? We hit the token table.
-    const { getPool } = await import('../../src/db/pool');
-    const [rows] = await getPool().query('SELECT token_hash FROM auth_tokens WHERE purpose = ? ORDER BY created_at DESC LIMIT 1', ['firm_invite']);
-    expect((rows as any[]).length).toBe(1);
+    const { q } = await import('../../src/db/pool');
+    const rows = await q('SELECT token_hash FROM auth_tokens WHERE purpose = ? ORDER BY created_at DESC LIMIT 1', ['firm_invite']);
+    expect(rows.length).toBe(1);
     // we can't reverse the hash — instead assert the member list grows once B accepts via a token we mint directly:
     // (token flow is covered by unit paths; here we simply assert membership guards work)
     const members = await api('GET', `/firms/${fid}/members`, undefined, tok);
@@ -515,9 +547,8 @@ describe.skipIf(SKIP)('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', 
   });
 
   it('user data export/delete path exists (§14 checklist) — firm delete refuses when last firm', async () => {
-    const solo = await api('POST', '/auth/signup', { email: email('solo'), password: 'password-123', displayName: 'Solo', firmName: 'OnlyFirm' });
-    expect(solo.status).toBe(201);
-    const del = await api('DELETE', `/firms/${solo.body.firm.id}`, undefined, solo.body.tokens.accessToken);
+    const solo = await signUpVerified('solo', { displayName: 'Solo', firmName: 'OnlyFirm' });
+    const del = await api('DELETE', `/firms/${solo.firm.id}`, undefined, solo.tokens.accessToken);
     expect(del.status).toBe(409);
     expect(del.body.error.code).toBe('LAST_FIRM');
   });

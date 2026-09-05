@@ -147,11 +147,11 @@ export async function writeSponsor(input: SponsorInputType): Promise<void> {
     `INSERT INTO app_sponsor
        (id, enabled, label, brand, by_line, pitch, cta, link_url, image_url, accent)
      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       enabled = VALUES(enabled), label = VALUES(label), brand = VALUES(brand),
-       by_line = VALUES(by_line), pitch = VALUES(pitch), cta = VALUES(cta),
-       link_url = VALUES(link_url), image_url = VALUES(image_url),
-       accent = VALUES(accent)`,
+     ON CONFLICT (id) DO UPDATE SET
+       enabled = excluded.enabled, label = excluded.label, brand = excluded.brand,
+       by_line = excluded.by_line, pitch = excluded.pitch, cta = excluded.cta,
+       link_url = excluded.link_url, image_url = excluded.image_url,
+       accent = excluded.accent`,
     [
       input.enabled ? 1 : 0,
       input.label,

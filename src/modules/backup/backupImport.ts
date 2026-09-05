@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { tx } from '../../db/pool';
+import { tx, Q } from '../../db/pool';
 import { errors, ErrorDetail, isDuplicateKey } from '../../lib/errors';
 import { isUuid, newId } from '../../lib/ids';
 import { parseBusinessDate } from '../../lib/dates';
@@ -73,7 +72,7 @@ export async function importBackup(
     });
   }
 
-  const write = async (label: string, rows: unknown[][], fn: (c: PoolConnection, r: unknown[]) => Promise<void>) => {
+  const write = async (label: string, rows: unknown[][], fn: (c: Q, r: unknown[]) => Promise<void>) => {
     for (let i = 0; i < rows.length; i += CHUNK) {
       const slice = rows.slice(i, i + CHUNK);
       await tx(async (c) => {
@@ -83,11 +82,19 @@ export async function importBackup(
     }
   };
 
-  const upsertSync = async (c: PoolConnection, table: string, cols: string[], vals: unknown[]) => {
-    const setters = cols.map((col) => `${col} = VALUES(${col})`).join(', ');
+  // Every table this is called with is keyed (firm_id, id), which is what
+  // lets one conflict target serve all of them. SQLite needs it spelled out —
+  // unlike MySQL's ON DUPLICATE KEY, which fired on whichever unique index
+  // happened to be hit.
+  const upsertSync = async (c: Q, table: string, cols: string[], vals: unknown[]) => {
+    const setters = cols
+      .filter((col) => col !== 'firm_id' && col !== 'id')
+      .map((col) => `${col} = excluded.${col}`)
+      .join(', ');
     await c.query(
       `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})
-       ON DUPLICATE KEY UPDATE ${setters}, deleted_at = NULL, rev = rev + 1, updated_by = VALUES(updated_by)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET
+         ${setters}, deleted_at = NULL, rev = rev + 1`,
       vals,
     );
   };
@@ -104,7 +111,7 @@ export async function importBackup(
     upsertSync(c, 'sources', ['firm_id', 'id', 'name', 'type', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.type, r.order, userId]));
 
   await write('routes', p.routes, async (c, r: any) => {
-    const [rows] = await c.query('SELECT id FROM party_routes WHERE firm_id = ? AND party_id = ? AND location_id = ? FOR UPDATE', [firmId, r.partyId, r.locationId]);
+    const [rows] = await c.query('SELECT id FROM party_routes WHERE firm_id = ? AND party_id = ? AND location_id = ?', [firmId, r.partyId, r.locationId]);
     const existing = (rows as any[])[0];
     if (existing) {
       await c.query('UPDATE party_routes SET distance_km=?, revenue_per_bag=?, deleted_at=NULL, rev=rev+1, updated_by=? WHERE firm_id=? AND id=?', [r.distanceKm, r.revenuePerBag, userId, firmId, existing.id]);
@@ -118,7 +125,9 @@ export async function importBackup(
     await tx(async (c) => {
       await c.query(
         `INSERT INTO opening_baselines (firm_id, date, updated_by) VALUES (?,?,?)
-         ON DUPLICATE KEY UPDATE date = VALUES(date), deleted_at = NULL, rev = rev + 1, updated_by = VALUES(updated_by)`,
+         ON CONFLICT (firm_id) DO UPDATE SET
+           date = excluded.date, deleted_at = NULL, rev = rev + 1,
+           updated_by = excluded.updated_by`,
         [firmId, b.date, userId],
       );
       await c.query('DELETE FROM opening_baseline_stock WHERE firm_id = ?', [firmId]);
@@ -137,7 +146,7 @@ export async function importBackup(
   }
 
   await write('stockDays', p.stockDays, async (c, r: any) => {
-    const [rows] = await c.query('SELECT id, deleted_at FROM stock_days WHERE firm_id = ? AND date = ? FOR UPDATE', [firmId, r.date]);
+    const [rows] = await c.query('SELECT id, deleted_at FROM stock_days WHERE firm_id = ? AND date = ?', [firmId, r.date]);
     const existing = (rows as any[])[0];
     let dayId: string;
     if (existing) {
@@ -167,11 +176,13 @@ export async function importBackup(
       `INSERT INTO freight_entries (firm_id, id, serial, date, party_id, location_id, vehicle_no, revenue_per_bag, bags,
          total_reimbursed, basis, cost_rate, cost_units, other_expenses, other_note, total_cost, profit, updated_by)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE date=VALUES(date), party_id=VALUES(party_id), location_id=VALUES(location_id),
-         vehicle_no=VALUES(vehicle_no), revenue_per_bag=VALUES(revenue_per_bag), bags=VALUES(bags),
-         total_reimbursed=VALUES(total_reimbursed), basis=VALUES(basis), cost_rate=VALUES(cost_rate),
-         cost_units=VALUES(cost_units), other_expenses=VALUES(other_expenses), other_note=VALUES(other_note),
-         total_cost=VALUES(total_cost), profit=VALUES(profit), deleted_at=NULL, rev=rev+1, updated_by=VALUES(updated_by)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET
+         date=excluded.date, party_id=excluded.party_id, location_id=excluded.location_id,
+         vehicle_no=excluded.vehicle_no, revenue_per_bag=excluded.revenue_per_bag, bags=excluded.bags,
+         total_reimbursed=excluded.total_reimbursed, basis=excluded.basis, cost_rate=excluded.cost_rate,
+         cost_units=excluded.cost_units, other_expenses=excluded.other_expenses, other_note=excluded.other_note,
+         total_cost=excluded.total_cost, profit=excluded.profit, deleted_at=NULL, rev=rev+1,
+         updated_by=excluded.updated_by`,
       [firmId, r.id, r.serial, r.date, r.partyId, r.locationId, r.vehicleNo, r.revenuePerBag, r.bags, r.totalReimbursed,
        r.basis, r.costRate, r.costUnits, r.otherExpenses, r.otherNote, r.totalCost, r.profit, userId],
     );
@@ -211,7 +222,7 @@ export async function importBackup(
     for (const pm of r.payments) {
       await c.query(
         `INSERT INTO purchase_payments (firm_id, id, purchase_id, date, amount) VALUES (?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE date = VALUES(date), amount = VALUES(amount)`,
+         ON CONFLICT (firm_id, id) DO UPDATE SET date = excluded.date, amount = excluded.amount`,
         [firmId, pm.id, r.id, pm.date, pm.amount],
       );
     }
@@ -233,7 +244,8 @@ export async function importBackup(
     for (const n of r.creditNotes) {
       await c.query(
         `INSERT INTO claim_credit_notes (firm_id, id, claim_id, date, number, amount) VALUES (?,?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE date = VALUES(date), number = VALUES(number), amount = VALUES(amount)`,
+         ON CONFLICT (firm_id, id) DO UPDATE SET
+         date = excluded.date, number = excluded.number, amount = excluded.amount`,
         [firmId, n.id, r.id, n.date, n.number, n.amount],
       );
     }

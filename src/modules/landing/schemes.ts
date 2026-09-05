@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { getPool, q, qOne, tx } from '../../db/pool';
+import { exec, q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { num } from '../../lib/num';
@@ -100,7 +99,7 @@ function toInput(d: SchemeWrite): SchemeInput {
   };
 }
 
-async function writeChildren(c: PoolConnection, firmId: string, schemeId: string, d: SchemeWrite): Promise<void> {
+async function writeChildren(c: Q, firmId: string, schemeId: string, d: SchemeWrite): Promise<void> {
   await c.query('DELETE FROM scheme_slabs WHERE firm_id = ? AND scheme_id = ?', [firmId, schemeId]);
   await c.query('DELETE FROM scheme_premium_grades WHERE firm_id = ? AND scheme_id = ?', [firmId, schemeId]);
   await c.query('DELETE FROM scheme_grades WHERE firm_id = ? AND scheme_id = ?', [firmId, schemeId]);
@@ -224,7 +223,7 @@ export async function patchScheme(firmId: string, userId: string, id: string, pa
 }
 
 export async function setActive(firmId: string, userId: string, id: string, active: boolean): Promise<any> {
-  const [res]: any = await getPool().query(
+  const res = await exec(
     'UPDATE schemes SET active = ?, rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ? AND deleted_at IS NULL',
     [active ? 1 : 0, userId, firmId, id],
   );

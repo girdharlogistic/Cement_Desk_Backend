@@ -52,7 +52,8 @@ it, compare `SHOW CREATE TABLE` against production, drop it. That check is what
 caught nothing this time — and would have caught the lost migration immediately.
 
 Backend tooling works fully here: `npm run build`, `npm test` (72 unit tests
-pass, 18 integration skipped without `TEST_DATABASE_URL`). **Flutter is not
+pass; the 18 integration tests now run too, on a temp SQLite file the suite
+creates and deletes itself). **Flutter is not
 installed** — the app cannot be built or run on this machine. Use
 `/tmp/dart-sdk/bin/dart` for `dart format` and note that `dart analyze` is
 useless here (no Flutter SDK to resolve against, so it reports phantom errors
@@ -60,11 +61,24 @@ on untouched files).
 
 ---
 
-## 2. Request units: the constraint is round trips, not data
+## 2. Round trips: why the caches exist
 
-The whole database is about **1 MB**. TiDB Serverless bills roughly one RU per
-statement almost regardless of how little it returns, and a DB round trip is
-~63ms. So the lever is always *fewer statements*, never *faster* ones.
+**The database is now a local SQLite file, not TiDB Cloud** (moved 2026-09-05,
+see README). A statement costs microseconds and nothing bills per query, so the
+pressure that shaped the code below is gone.
+
+Everything in this section still stands, and none of it should be unpicked on
+the grounds that it is no longer needed. The caches and the `data_updated_at`
+watermark are what keep a fifteen-second poll from twelve phones off the CPU,
+and the invariants below are correctness rules — a missed watermark bump loses
+a write on somebody's phone whatever the database is.
+
+The numbers that follow are the TiDB-era measurements, kept because they are
+what the design is answering.
+
+The whole database is about **5 MB**. TiDB Serverless billed roughly one RU per
+statement almost regardless of how little it returned, and a DB round trip was
+~63ms. So the lever was always *fewer statements*, never *faster* ones.
 
 Measured before/after on an idle `sync/pull`:
 

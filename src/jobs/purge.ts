@@ -1,5 +1,6 @@
-import { getPool } from '../db/pool';
+import { exec } from '../db/pool';
 import { getConfig } from '../config';
+import { addDaysSql, nowSql } from '../lib/dates';
 
 const TENANT_TABLES = [
   'freight_entry_grades', // hard-purged via parent cascade, listed defensively last-priority
@@ -13,32 +14,40 @@ const TENANT_TABLES = [
  */
 export async function runPurgeJobs(): Promise<Record<string, number>> {
   const cfg = getConfig();
-  const pool = getPool();
   const out: Record<string, number> = {};
+
+  // Cutoffs are computed here rather than in SQL. MySQL's
+  // `UTC_TIMESTAMP(3) - INTERVAL ? DAY` has no SQLite spelling that takes a
+  // bound parameter, and a date string is a value like any other — the same
+  // reasoning as §5.7, where business dates never touch a date type either.
+  const now = new Date();
+  const tombstoneCutoff = addDaysSql(now, -cfg.TOMBSTONE_RETENTION_DAYS);
 
   for (const t of TENANT_TABLES.filter((x) => x !== 'freight_entry_grades')) {
     // FK-safe: children are cleaned up by ON DELETE CASCADE on parent purge.
-    const [res]: any = await pool.query(
-      `DELETE FROM ${t} WHERE deleted_at IS NOT NULL AND deleted_at < UTC_TIMESTAMP(3) - INTERVAL ? DAY`,
-      [cfg.TOMBSTONE_RETENTION_DAYS],
+    const res = await exec(
+      `DELETE FROM ${t} WHERE deleted_at IS NOT NULL AND deleted_at < ?`,
+      [tombstoneCutoff],
     );
     out[`tombstones:${t}`] = res.affectedRows ?? 0;
   }
 
-  const [sess]: any = await pool.query(
-    `DELETE FROM sessions WHERE (expires_at < UTC_TIMESTAMP(3) OR revoked_at IS NOT NULL)
-       AND created_at < UTC_TIMESTAMP(3) - INTERVAL 30 DAY`,
+  const sess = await exec(
+    `DELETE FROM sessions WHERE (expires_at < ? OR revoked_at IS NOT NULL)
+       AND created_at < ?`,
+    [nowSql(now), addDaysSql(now, -30)],
   );
   out['sessions'] = sess.affectedRows ?? 0;
 
-  const [tok]: any = await pool.query(
-    'DELETE FROM auth_tokens WHERE used_at IS NOT NULL OR expires_at < UTC_TIMESTAMP(3)',
+  const tok = await exec(
+    'DELETE FROM auth_tokens WHERE used_at IS NOT NULL OR expires_at < ?',
+    [nowSql(now)],
   );
   out['auth_tokens'] = tok.affectedRows ?? 0;
 
-  const [idem]: any = await pool.query(
-    'DELETE FROM idempotency_keys WHERE created_at < UTC_TIMESTAMP(3) - INTERVAL 1 DAY',
-  );
+  const idem = await exec('DELETE FROM idempotency_keys WHERE created_at < ?', [
+    addDaysSql(now, -1),
+  ]);
   out['idempotency_keys'] = idem.affectedRows ?? 0;
 
   return out;

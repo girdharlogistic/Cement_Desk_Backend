@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { num } from '../../lib/num';
@@ -102,7 +101,7 @@ export async function createClaim(firmId: string, userId: string, d: ClaimWrite)
   return (await fetchClaim(firmId, id))!;
 }
 
-async function insertClaim(c: PoolConnection, firmId: string, id: string, d: ClaimWrite, userId: string): Promise<void> {
+async function insertClaim(c: Q, firmId: string, id: string, d: ClaimWrite, userId: string): Promise<void> {
   await c.query(
     `INSERT INTO claims (firm_id, id, scheme_id, company_id, scheme_name, period_from, period_to, label, bags, accrued, updated_by)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
@@ -170,7 +169,8 @@ export async function addCreditNote(
   await tx(async (c) => {
     await c.query(
       `INSERT INTO claim_credit_notes (firm_id, id, claim_id, date, number, amount) VALUES (?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE date = VALUES(date), number = VALUES(number), amount = VALUES(amount)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET
+         date = excluded.date, number = excluded.number, amount = excluded.amount`,
       [firmId, id, claimId, n.date, n.number, n.amount],
     );
     await applyAutoStatus(c, firmId, claimId, userId);
@@ -189,7 +189,7 @@ export async function deleteCreditNote(firmId: string, userId: string, claimId: 
 }
 
 /** Recompute + persist status after credit-note changes; bump parent rev (§9.2). */
-async function applyAutoStatus(c: PoolConnection, firmId: string, claimId: string, userId: string): Promise<void> {
+async function applyAutoStatus(c: Q, firmId: string, claimId: string, userId: string): Promise<void> {
   const [claims] = await c.query('SELECT status, accrued, sent_on FROM claims WHERE firm_id = ? AND id = ?', [firmId, claimId]);
   const r = (claims as any[])[0];
   if (!r) return;

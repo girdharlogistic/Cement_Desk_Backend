@@ -51,7 +51,7 @@ export const MASTER_DEFS: MasterDef[] = [
     }),
     // §3.2: order ASC, numeric code (non-numeric sorts last at rank 1<<20), name CI.
     orderBy: `ORDER BY sort_order ASC,
-      CASE WHEN code IS NULL OR code NOT REGEXP '^[0-9]+$' THEN 1048576 ELSE CAST(code AS DECIMAL(20,0)) END ASC,
+      CASE WHEN code IS NULL OR code NOT REGEXP '^[0-9]+$' THEN 1048576 ELSE CAST(code AS INTEGER) END ASC,
       LOWER(name) ASC`,
   },
   {

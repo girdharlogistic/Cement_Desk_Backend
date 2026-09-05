@@ -8,16 +8,24 @@ try {
 }
 
 const EnvSchema = z.object({
-  TIDB_HOST: z.string().min(1),
-  TIDB_PORT: z.coerce.number().int().default(4000),
-  TIDB_USER: z.string().min(1),
-  TIDB_PASSWORD: z.string().default(''),
-  TIDB_DATABASE: z.string().min(1).default('cement_desk'),
-  TIDB_TLS: z
-    .string()
-    .default('true')
-    .transform((v) => v === 'true' || v === '1'),
-  DB_POOL_SIZE: z.coerce.number().int().min(1).max(50).default(10),
+  /**
+   * The database file. SQLite since 2026-09-05, replacing TiDB Cloud — its
+   * free tier's request-unit ceiling had become the binding constraint on a
+   * dataset of a few thousand rows.
+   *
+   * Deliberately outside the repo, like CONSOLE_MEDIA_DIR: a `git clean` must
+   * not be able to delete the books. The directory is created at boot if it is
+   * not there, and the WAL and shared-memory files live beside it.
+   */
+  SQLITE_PATH: z.string().min(1).default('/home/ubuntu/cementdesk-data/cementdesk.db'),
+
+  /**
+   * Where the nightly `VACUUM INTO` snapshots go, and how many to keep. Empty
+   * disables them. This matters more than it did on TiDB: nothing replicates
+   * this file any more, so a backup is the only copy that is not on one disk.
+   */
+  SQLITE_BACKUP_DIR: z.string().default(''),
+  SQLITE_BACKUP_KEEP: z.coerce.number().int().min(1).max(365).default(14),
 
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 chars'),
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().default(15 * 60),

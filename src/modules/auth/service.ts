@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { invalidateAllSessions, invalidateSession } from '../../lib/caches';
 import { hashPassword, verifyPassword, DUMMY_HASH_PROMISE } from '../../lib/passwords';
@@ -45,7 +44,7 @@ export function mapUser(r: any): UserWire {
 export const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
 async function createSession(
-  c: PoolConnection,
+  c: Q,
   userId: string,
   deviceId: string | null,
   deviceLabel: string,
@@ -78,7 +77,7 @@ async function createSession(
  * account instead of replacing it.
  */
 async function issueOtp(
-  c: PoolConnection,
+  c: Q,
   purpose: 'verify_email' | 'reset_password',
   userId: string,
   emailNorm: string,
@@ -91,7 +90,7 @@ async function issueOtp(
   const otp = generateOtp();
   await c.query(
     `INSERT INTO auth_tokens (id, user_id, email_norm, purpose, token_hash, salt, payload, expires_at)
-     VALUES (?,?,?,?,?,?,CAST(? AS JSON),?)`,
+     VALUES (?,?,?,?,?,?,?,?)`,
     [
       newId(),
       userId,
@@ -124,7 +123,7 @@ async function consumeOtp(
     const [rows] = await c.query(
       `SELECT * FROM auth_tokens
         WHERE user_id = ? AND purpose = ? AND used_at IS NULL
-        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+        ORDER BY created_at DESC LIMIT 1`,
       [userId, purpose],
     );
     const tok = (rows as any[])[0];

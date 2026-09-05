@@ -1,4 +1,5 @@
 import { q, qOne } from '../../db/pool';
+import { addDaysSql } from '../../lib/dates';
 import { entitlementOf } from '../plans/service';
 import { readEntitlement } from '../plans/repo';
 import { Features } from '../plans/features';
@@ -333,20 +334,22 @@ export async function analytics(): Promise<Analytics> {
     `SELECT
        (SELECT COUNT(*) FROM users) AS totalUsers,
        (SELECT COUNT(*) FROM users WHERE email_verified = 1) AS verifiedUsers,
-       (SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_used_at >= UTC_TIMESTAMP(3) - INTERVAL 7 DAY) AS active7,
-       (SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_used_at >= UTC_TIMESTAMP(3) - INTERVAL 30 DAY) AS active30,
+       (SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_used_at >= ?) AS active7,
+       (SELECT COUNT(DISTINCT user_id) FROM sessions WHERE last_used_at >= ?) AS active30,
        (SELECT COUNT(*) FROM firms WHERE deleted_at IS NULL) AS totalFirms,
        (SELECT COUNT(*) FROM freight_entries WHERE deleted_at IS NULL) AS totalEntries,
        (SELECT COUNT(*) FROM stock_days WHERE deleted_at IS NULL) AS totalStockDays,
        (SELECT COUNT(*) FROM purchases WHERE deleted_at IS NULL) AS totalPurchases,
        (SELECT COUNT(*) FROM schemes WHERE deleted_at IS NULL) AS totalSchemes,
        (SELECT COUNT(*) FROM claims WHERE deleted_at IS NULL) AS totalClaims`,
+    [addDaysSql(new Date(), -7), addDaysSql(new Date(), -30)],
   );
 
   const signupRows = await q<{ d: string; n: number }>(
     `SELECT DATE(created_at) AS d, COUNT(*) AS n FROM users
-     WHERE created_at >= UTC_TIMESTAMP(3) - INTERVAL 30 DAY
+     WHERE created_at >= ?
      GROUP BY DATE(created_at) ORDER BY d`,
+    [addDaysSql(new Date(), -30)],
   );
 
   const topFirmsRows = await q<any>(

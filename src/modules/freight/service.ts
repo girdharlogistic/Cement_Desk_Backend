@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { sqlToIso, addSecondsSql, parseBusinessDate } from '../../lib/dates';
@@ -62,32 +61,45 @@ export async function gradeBagsFor(firmId: string, entryIds: string[]): Promise<
 }
 
 /**
- * §5.1 serial allocation: per-firm, monotonic, never reused. LAST_INSERT_ID
- * trick makes the increment atomic under concurrency on TiDB/MySQL.
+ * §5.1 serial allocation: per-firm, monotonic, never reused.
+ *
+ * On TiDB this was the `LAST_INSERT_ID(freight_serial + 1)` trick, which made
+ * "increment and tell me the new value" one statement because MySQL has no
+ * RETURNING. SQLite does, so the same guarantee is now just an UPDATE that
+ * says what it wrote — and the caller is inside a transaction, which this
+ * driver serializes against every other one, so no two callers can be between
+ * the read and the write at the same time.
+ *
+ * Exported because the sync push allocates serials for entries created
+ * offline, and two implementations of the counter is exactly the sort of thing
+ * that drifts.
  */
-async function allocateSerial(c: PoolConnection, firmId: string): Promise<number> {
-  const [upd]: any = await c.query(
-    'UPDATE firm_counters SET freight_serial = LAST_INSERT_ID(freight_serial + 1) WHERE firm_id = ?',
+export async function allocateSerial(c: Q, firmId: string): Promise<number> {
+  const [rows]: any = await c.query(
+    'UPDATE firm_counters SET freight_serial = freight_serial + 1 WHERE firm_id = ? RETURNING freight_serial',
     [firmId],
   );
-  if (upd.affectedRows === 0) {
-    await c.query('INSERT INTO firm_counters (firm_id, freight_serial) VALUES (?, LAST_INSERT_ID(1))', [firmId]);
-  }
-  const [rows] = await c.query('SELECT LAST_INSERT_ID() AS s');
-  return Number((rows as any[])[0].s);
+  if (rows.length) return Number(rows[0].freight_serial);
+
+  // First entry for this firm — the counter row does not exist yet.
+  const [seeded]: any = await c.query(
+    'INSERT INTO firm_counters (firm_id, freight_serial) VALUES (?, 1) RETURNING freight_serial',
+    [firmId],
+  );
+  return Number(seeded[0].freight_serial);
 }
 
 /** Used by the import path (§5.1 / ensureSerialAtLeast). */
-export async function ensureSerialAtLeast(c: PoolConnection, firmId: string, maxSerial: number): Promise<void> {
-  await c.query('INSERT IGNORE INTO firm_counters (firm_id, freight_serial) VALUES (?, 0)', [firmId]);
-  await c.query('UPDATE firm_counters SET freight_serial = GREATEST(freight_serial, ?) WHERE firm_id = ?', [
+export async function ensureSerialAtLeast(c: Q, firmId: string, maxSerial: number): Promise<void> {
+  await c.query('INSERT OR IGNORE INTO firm_counters (firm_id, freight_serial) VALUES (?, 0)', [firmId]);
+  await c.query('UPDATE firm_counters SET freight_serial = MAX(freight_serial, ?) WHERE firm_id = ?', [
     maxSerial,
     firmId,
   ]);
 }
 
 async function writeGradeBags(
-  c: PoolConnection,
+  c: Q,
   firmId: string,
   entryId: string,
   gradeBags: Record<string, number>,
@@ -142,13 +154,13 @@ export async function createEntry(firmId: string, userId: string, data: FreightW
   return (await fetchEntry(firmId, id))!;
 }
 
-async function fetchEntryOn(c: PoolConnection, firmId: string, id: string): Promise<any | null> {
+async function fetchEntryOn(c: Q, firmId: string, id: string): Promise<any | null> {
   const [rows] = await c.query('SELECT * FROM freight_entries WHERE firm_id = ? AND id = ?', [firmId, id]);
   return (rows as any[])[0] ?? null;
 }
 
 async function insertEntryRow(
-  c: PoolConnection,
+  c: Q,
   firmId: string,
   id: string,
   serial: number,
@@ -260,7 +272,7 @@ export async function patchEntry(
  * (§9.2), the same as any other edit.
  */
 export async function compactSerialsAfterDelete(
-  c: PoolConnection,
+  c: Q,
   firmId: string,
   deletedSerial: number,
   userId: string,
@@ -276,7 +288,7 @@ export async function compactSerialsAfterDelete(
     );
   }
   // Whether or not anything was above it, one fewer serial is now in use.
-  await c.query('UPDATE firm_counters SET freight_serial = GREATEST(freight_serial - 1, 0) WHERE firm_id = ?', [
+  await c.query('UPDATE firm_counters SET freight_serial = MAX(freight_serial - 1, 0) WHERE firm_id = ?', [
     firmId,
   ]);
 }
@@ -410,7 +422,7 @@ export async function withIdempotency<T>(
   }
   const out = await fn();
   try {
-    await q('INSERT INTO idempotency_keys (key_hash, user_id, endpoint, response_code, response_body) VALUES (?,?,?,?,CAST(? AS JSON))', [
+    await q('INSERT INTO idempotency_keys (key_hash, user_id, endpoint, response_code, response_body) VALUES (?,?,?,?,?)', [
       keyHash,
       userId,
       endpoint,

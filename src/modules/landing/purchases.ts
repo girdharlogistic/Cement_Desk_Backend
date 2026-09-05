@@ -1,5 +1,4 @@
-import { PoolConnection } from 'mysql2/promise';
-import { q, qOne, tx } from '../../db/pool';
+import { q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { newId } from '../../lib/ids';
 import { num } from '../../lib/num';
@@ -18,7 +17,7 @@ export interface PurchaseWrite {
   payments?: { id?: string; date: string; amount: number }[];
 }
 
-export async function paymentsFor(c: PoolConnection | null, firmId: string, purchaseIds: string[]): Promise<any[]> {
+export async function paymentsFor(c: Q | null, firmId: string, purchaseIds: string[]): Promise<any[]> {
   if (!purchaseIds.length) return [];
   const ph = purchaseIds.map(() => '?').join(',');
   const sql = `SELECT * FROM purchase_payments WHERE firm_id = ? AND purchase_id IN (${ph}) ORDER BY date ASC, id ASC`;
@@ -65,13 +64,13 @@ async function checkRefs(firmId: string, d: PurchaseWrite): Promise<void> {
   }
 }
 
-async function writePayments(c: PoolConnection, firmId: string, purchaseId: string, payments: NonNullable<PurchaseWrite['payments']>): Promise<void> {
+async function writePayments(c: Q, firmId: string, purchaseId: string, payments: NonNullable<PurchaseWrite['payments']>): Promise<void> {
   for (const p of payments) {
     const pid = p.id ?? newId();
     // Additive ledger (§9.4): upsert by id, never conflicts.
     await c.query(
       `INSERT INTO purchase_payments (firm_id, id, purchase_id, date, amount) VALUES (?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE date = VALUES(date), amount = VALUES(amount)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET date = excluded.date, amount = excluded.amount`,
       [firmId, pid, purchaseId, p.date, p.amount],
     );
   }
@@ -161,7 +160,7 @@ export async function addPayment(firmId: string, userId: string, purchaseId: str
   await tx(async (c) => {
     await c.query(
       `INSERT INTO purchase_payments (firm_id, id, purchase_id, date, amount) VALUES (?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE date = VALUES(date), amount = VALUES(amount)`,
+       ON CONFLICT (firm_id, id) DO UPDATE SET date = excluded.date, amount = excluded.amount`,
       [firmId, id, purchaseId, p.date, p.amount],
     );
     // Child mutation bumps parent so sync pull picks it up (§9.2).

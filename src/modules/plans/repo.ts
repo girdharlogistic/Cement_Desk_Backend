@@ -192,10 +192,10 @@ export async function upsertEntitlement(e: EntitlementUpsert): Promise<void> {
   await q(
     `INSERT INTO entitlements (user_id, plan_id, source, status, expires_at, purchase_token, note)
      VALUES (?,?,?,?,?,?,?)
-     ON DUPLICATE KEY UPDATE
-       plan_id = VALUES(plan_id), source = VALUES(source), status = VALUES(status),
-       expires_at = VALUES(expires_at), purchase_token = VALUES(purchase_token),
-       note = VALUES(note)`,
+     ON CONFLICT (user_id) DO UPDATE SET
+       plan_id = excluded.plan_id, source = excluded.source, status = excluded.status,
+       expires_at = excluded.expires_at, purchase_token = excluded.purchase_token,
+       note = excluded.note`,
     [e.userId, e.planId, e.source, e.status, e.expiresAtSql, e.purchaseToken ?? '', e.note ?? ''],
   );
 }

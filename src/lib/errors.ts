@@ -52,8 +52,15 @@ export const errors = {
   },
 };
 
-/** MySQL/TiDB duplicate-key error number. */
-export const ER_DUP_ENTRY = 1062;
+/**
+ * SQLite's extended result codes for a uniqueness violation:
+ * SQLITE_CONSTRAINT_UNIQUE and SQLITE_CONSTRAINT_PRIMARYKEY. node:sqlite puts
+ * them on `errcode`. (MySQL's single ER_DUP_ENTRY 1062 covered both.)
+ */
+export const SQLITE_CONSTRAINT_UNIQUE = 2067;
+export const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
 export function isDuplicateKey(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as any).errno === ER_DUP_ENTRY;
+  if (typeof e !== 'object' || e === null) return false;
+  const code = (e as any).errcode;
+  return code === SQLITE_CONSTRAINT_UNIQUE || code === SQLITE_CONSTRAINT_PRIMARYKEY;
 }

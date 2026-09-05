@@ -2,6 +2,7 @@ import { buildApp } from './app';
 import { getConfig } from './config';
 import { runMigrations } from './db/migrate';
 import { startJobs } from './jobs/purge';
+import { startBackups } from './jobs/backup';
 
 async function main(): Promise<void> {
   const cfg = getConfig();
@@ -13,6 +14,7 @@ async function main(): Promise<void> {
   const app = await buildApp();
   await app.listen({ port: cfg.PORT, host: cfg.HOST });
   if (cfg.ENABLE_JOBS) startJobs();
+  startBackups();
 
   const shutdown = async (signal: string) => {
     app.log.info({ signal }, 'shutting down');

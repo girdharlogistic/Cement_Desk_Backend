@@ -1,4 +1,3 @@
-import { PoolConnection } from 'mysql2/promise';
 import { q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { isUuid, newId } from '../../lib/ids';
@@ -116,7 +115,7 @@ export async function reorderRows(table: MasterTable, firmId: string, ids: strin
  * in stock cells & baseline maps) are hard-deleted and their parent days get a
  * rev bump so the change propagates on the next pull.
  */
-export async function deleteWithCascade(c: PoolConnection, table: MasterTable, firmId: string, id: string, userId: string): Promise<void> {
+export async function deleteWithCascade(c: Q, table: MasterTable, firmId: string, id: string, userId: string): Promise<void> {
   const deleted = await softDeleteRow(c, table, firmId, id, userId);
   if (!deleted) return;
 
@@ -189,19 +188,23 @@ export async function deleteWithCascade(c: PoolConnection, table: MasterTable, f
 }
 
 async function bumpDaysForCellCleanup(
-  c: PoolConnection,
+  c: Q,
   firmId: string,
   column: 'party_id' | 'grade_id',
   refId: string,
   userId: string,
 ): Promise<void> {
+  // Was MySQL's `UPDATE ... JOIN (subquery)`, which SQLite does not have. The
+  // IN-subquery form does the same work and is what the multi-table syntax was
+  // sugar for: bump every day that has a cell pointing at the row being
+  // deleted, so the other devices pull the day and see the cell gone.
   await c.query(
-    `UPDATE stock_days d JOIN (
-        SELECT DISTINCT stock_day_id FROM stock_day_cells WHERE firm_id = ? AND ${column} = ?
-      ) x ON x.stock_day_id = d.id
-      SET d.rev = d.rev + 1, d.updated_by = ?
-     WHERE d.firm_id = ?`,
-    [firmId, refId, userId, firmId],
+    `UPDATE stock_days SET rev = rev + 1, updated_by = ?
+      WHERE firm_id = ?
+        AND id IN (
+          SELECT stock_day_id FROM stock_day_cells WHERE firm_id = ? AND ${column} = ?
+        )`,
+    [userId, firmId, firmId, refId],
   );
   await c.query(`DELETE FROM stock_day_cells WHERE firm_id = ? AND ${column} = ?`, [firmId, refId]);
 }
