@@ -84,6 +84,30 @@ Two things about that module are load-bearing and look like mistakes:
   install prompt on a page no service worker controls, and the "Add to Home
   Screen" button lives on `/`, which a worker scoped to `/app/` cannot reach.
 
+### Web push joins the same topic, server-side
+
+A browser can mint an FCM registration token but cannot join a topic — the JS
+SDK has no such call. So `POST /me/push-tokens` does the join for it through
+the Instance ID API (`iid.googleapis.com`, `access_token_auth: true`, the FCM
+OAuth scope `lib/google_sa.ts` already mints). The console's `sendToTopic` is
+unchanged and now reaches phones and browsers with one message.
+
+**Still no token table, deliberately.** Nothing is stored at either end. A
+stale token is dropped by Google, and the app posts its token on every launch
+where it has changed — the same "call it again each launch" shape the Android
+side already had for `subscribeToTopic`.
+
+`/firebase-messaging-sw.js` is served from the **origin root** because that is
+the only path Firebase's SDK looks for. It registers under Firebase's own
+scope (`/firebase-cloud-messaging-push-scope`), which is why it does not evict
+`/sw.js` or the PWA's worker at `/app/sw.js` — three disjoint scopes, three
+registrations. It is generated from the same config `/app/push-config` returns
+so the two cannot drift.
+
+`FCM_VAPID_KEY` is optional: empty means the JS SDK uses its own published
+key, which works. Generating a project key pair in the console is the better
+long-run answer and is a drop-in.
+
 `WEB_DEV_ORIGINS` is empty in production and should stay that way — it turns
 on a CORS hook for `flutter run -d chrome`, and the deployed app never needs
 it.

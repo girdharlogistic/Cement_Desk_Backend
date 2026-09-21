@@ -109,6 +109,31 @@ const EnvSchema = z.object({
   /** Service-account JSON with permission to send to the Firebase project. */
   FCM_KEY_PATH: z.string().default(''),
   FCM_TOPIC: z.string().default('all'),
+
+  // ---- web push ----
+  //
+  // The browser half of the same Firebase project. A web app has to be
+  // registered in the Firebase console separately from the Android one — it
+  // gets its own app id, and Web Push needs a VAPID key pair that only exists
+  // once someone presses "Generate key pair" under Cloud Messaging.
+  //
+  // None of this is secret. Firebase web config is public by construction: it
+  // ships inside every page that uses it, and the VAPID *public* key is meant
+  // to be handed to browsers. It lives in the environment rather than in the
+  // client bundle only so that rotating it is a restart here instead of a
+  // rebuild and redeploy of the app.
+  //
+  // Leave FCM_WEB_APP_ID or FCM_VAPID_KEY empty and web push stays off: the
+  // config route answers null and the PWA says announcements are not set up,
+  // rather than asking for a permission it cannot use.
+  FCM_WEB_API_KEY: z.string().default(''),
+  FCM_WEB_APP_ID: z.string().default(''),
+  FCM_VAPID_KEY: z.string().default(''),
+  // Defaulted from android/app/google-services.json, which is committed in the
+  // app repo and public. Only override these if the project itself moves.
+  FCM_WEB_PROJECT_ID: z.string().default('cement-desk'),
+  FCM_WEB_SENDER_ID: z.string().default('1055000759045'),
+  FCM_WEB_AUTH_DOMAIN: z.string().default('cement-desk.firebaseapp.com'),
   /** Where uploaded notification images are written — outside the repo. */
   CONSOLE_MEDIA_DIR: z.string().default(''),
   /**

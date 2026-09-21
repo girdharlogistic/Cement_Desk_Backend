@@ -14,6 +14,10 @@ import { registerAccountRoutes } from './modules/account/routes';
 import { registerAdsTxtRoute } from './modules/ads_txt';
 import { registerSiteRoutes } from './modules/site/routes';
 import { registerWebAppRoutes } from './modules/webapp/routes';
+import {
+  registerPushRoutes,
+  registerPushServiceWorkerRoute,
+} from './modules/push/routes';
 import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
@@ -171,6 +175,10 @@ export async function buildApp(): Promise<FastifyInstance> {
   // on purpose — see the module's header.
   registerWebAppRoutes(app);
 
+  // Root-level because Firebase's JS SDK looks for its background handler at
+  // exactly `/firebase-messaging-sw.js` and nowhere else.
+  registerPushServiceWorkerRoute(app);
+
   // Also outside /api/v1, and also public: Play requires the deletion route to
   // be reachable in a browser by someone who has already uninstalled the app.
   registerAccountRoutes(app);
@@ -188,6 +196,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       registerSponsorRoutes(api);
       registerPlanRoutes(api);
       registerBillingRoutes(api);
+      registerPushRoutes(api);
     },
     { prefix: '/api/v1' },
   );

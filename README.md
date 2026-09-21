@@ -47,6 +47,12 @@ Public endpoints (behind a Cloudflare tunnel):
   check → acknowledge → entitlement. Plans carry feature limits as JSON
   (prices live only on Play). One-time grandfathering preserved `bestLimit`
   limits for early multi-firm/multi-device accounts.
+- **Web push** — `GET /app/push-config` hands a browser the Firebase web
+  config it needs to mint a registration token; `POST /me/push-tokens` takes
+  that token and joins it to the broadcast topic, which a browser cannot do
+  for itself. `/firebase-messaging-sw.js` at the origin root is the generated
+  background handler Firebase's SDK looks for. No token table: the app
+  re-registers on every launch, exactly as the Android side re-subscribes.
 - **The web app** — the Flutter client, built for the browser, served at
   `/app/` from `WEBAPP_DIR` (`/home/ubuntu/cementdesk-webapp`, outside both
   repos). Same origin as the API on purpose: the PWA's requests are
@@ -71,7 +77,7 @@ src/
                · validators · num · dates · google_sa (FCM + Play OAuth)
   modules/     auth · firms · masters · freight · stock · landing · sync
                · backup · plans · billing · sponsor · console · site
-               · account · ads_txt · webapp (the PWA at /app/)
+               · account · ads_txt · webapp (the PWA at /app/) · push
   jobs/        purge (tombstones/sessions/tokens, every 6 h)
 migrations-sqlite/  live schema, run at boot in filename order
 migrations/         the old TiDB files, kept as history — nothing reads them
