@@ -75,6 +75,17 @@ const PAGE = `<!doctype html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<!--
+  The PWA's manifest, linked from the marketing page on purpose: Chrome only
+  offers its install prompt on a page that declares one, and the install
+  button belongs here, beside the Play button, not hidden inside the app.
+  The manifest scopes itself to /app/ and starts there, so installing from
+  this page still gives you an icon that opens the app and not the pitch.
+-->
+<link rel="manifest" href="/app/manifest.json">
+<meta name="theme-color" content="#FAF6F0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100E0B" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/app/icons/apple-touch-icon-180.png">
 <style>
   :root {
     --cream: #FAF6F0; --paper: #FFFFFF; --shell: #F1E9DF; --hairline: #E4D9CC;
@@ -250,12 +261,48 @@ const PAGE = `<!doctype html>
   details[open] summary::after { content: '–'; }
   details p { color: var(--ink-muted); margin: 12px 0 0; font-size: 14.5px; }
 
+  /* ── install ── */
+  .btn-install { background: var(--terracotta); color: #241209; border: 1px solid transparent; }
+  .btn-install:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(201,123,78,.3); }
+  .install-note { margin-top: 10px; font-size: 13.5px; color: var(--ink-muted); }
+
+  /* The iOS instructions. Safari has never implemented an install prompt, so
+     the only honest thing a button can do there is show where the control is. */
+  #ios-sheet {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: flex-end; justify-content: center;
+    background: rgba(20, 12, 6, .48);
+  }
+  #ios-sheet.open { display: flex; }
+  #ios-sheet .sheet {
+    background: var(--paper); color: var(--ink);
+    border-radius: 26px 26px 0 0; padding: 26px 24px 34px;
+    width: 100%; max-width: 460px;
+    box-shadow: 0 -20px 60px rgba(20,12,6,.35);
+  }
+  #ios-sheet h3 { margin: 0 0 6px; font-size: 20px; }
+  #ios-sheet p { color: var(--ink-muted); margin: 0 0 18px; font-size: 14.5px; }
+  #ios-sheet ol { margin: 0 0 20px; padding-left: 20px; }
+  #ios-sheet li { margin-bottom: 10px; font-size: 15px; }
+  #ios-sheet .close {
+    width: 100%; font: inherit; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--hairline); background: var(--shell); color: var(--ink);
+    border-radius: 999px; padding: 12px;
+  }
+  .share-glyph {
+    display: inline-block; vertical-align: -3px;
+    width: 16px; height: 16px; color: var(--terracotta);
+  }
+
   /* ── footer ── */
   footer { border-top: 1px solid var(--hairline); padding: 40px 0 56px; color: var(--ink-muted); font-size: 14px; }
   footer .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
   footer .row .grow { flex: 1; }
 
   @media (max-width: 860px) {
+    /* The bar holds a wordmark and two buttons; below this the install one
+       moves to the hero, where it is anyway the more prominent of the two. */
+    #install-nav { display: none; }
     .hero-inner { grid-template-columns: 1fr; }
     .grid-3 { grid-template-columns: 1fr; }
     .split { grid-template-columns: 1fr; }
@@ -274,6 +321,7 @@ const PAGE = `<!doctype html>
   <span class="mark">C</span>
   <span class="wordmark">Cement Desk</span>
   <span class="spacer"></span>
+  <a class="btn btn-install" id="install-nav" href="/app/" data-install>Add to Home Screen</a>
   <a class="btn btn-primary" href="${PLAY_URL}">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.6 2.3c-.3.3-.5.8-.5 1.4v16.6c0 .6.2 1.1.6 1.4l.1.1L13 12.5v-.4L3.7 2.2l-.1.1zm13.2 10.6-3-3 4.4-2.5c1.4-.8 1.5-2.1.3-2.8L4.9 2l8.8 8.8 3.1 2.1zm-3 2.2L4.9 22 18.6 14c1.2-.7 1.1-2-.3-2.8l-4.4-2.5 3 2.4z" transform="translate(0 -.7) scale(1.0)"/></svg>
     Get it on Google Play
@@ -291,8 +339,13 @@ const PAGE = `<!doctype html>
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.6 2.3c-.3.3-.5.8-.5 1.4v16.6c0 .6.2 1.1.6 1.4l.1.1L13 12.5v-.4L3.7 2.2l-.1.1zm13.2 10.6-3-3 4.4-2.5c1.4-.8 1.5-2.1.3-2.8L4.9 2l8.8 8.8 3.1 2.1zm-3 2.2L4.9 22 18.6 14c1.2-.7 1.1-2-.3-2.8l-4.4-2.5 3 2.4z" transform="translate(0 -.7)"/></svg>
           Download — free trial
         </a>
+        <a class="btn btn-install" href="/app/" data-install>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+          Add to Home Screen
+        </a>
         <a class="btn btn-ghost" href="#features">See what it does</a>
       </div>
+      <p class="install-note" id="install-note">Installs straight from this page — works on Android and iPhone, no store needed.</p>
       <div class="hero-proof">
         <span><b>30 days</b> free trial</span>
         <span><b>Works offline</b> fully</span>
@@ -397,6 +450,7 @@ const PAGE = `<!doctype html>
       </div>
     </div>
     <div class="hero-ctas" style="margin-top:36px">
+      <a class="btn btn-install" href="/app/" data-install>Add to Home Screen</a>
       <a class="btn btn-ghost" style="border-color:rgba(247,239,230,.3);color:var(--on-dark);background:transparent" href="${PLAY_URL}">Start the free trial on Google Play</a>
     </div>
   </div>
@@ -420,6 +474,14 @@ const PAGE = `<!doctype html>
       <p>Yes — add them as read-only on the firm and they see the same books live, without your password and without touching anything. Premium removes its ads too.</p>
     </details>
     <details>
+      <summary>Is there an iPhone app?</summary>
+      <p>Not on the App Store — but tap <b>Add to Home Screen</b> above and Cement Desk installs itself on an iPhone or iPad, with its own icon, its own window and no Safari chrome. It is the same app: the same screens, the same offline working, the same books syncing to the same account. Android works this way too if you would rather not use the Play Store.</p>
+    </details>
+    <details>
+      <summary>Does the web version keep working without signal?</summary>
+      <p>Yes. Once it has installed, everything lives on the device exactly as it does in the Android app — you can write a whole day of vouchers on a dead connection and it catches up when you have one. Buying Premium is the one thing that only happens in the Android app; whatever you buy there applies everywhere you sign in.</p>
+    </details>
+    <details>
       <summary>I'm switching from WhatsApp-and-Excel — how do my books get in?</summary>
       <p>Parties, locations and grades take minutes to set up. The history doesn't need importing: the app starts from your opening balances, exactly like the register did before it.</p>
     </details>
@@ -430,10 +492,135 @@ const PAGE = `<!doctype html>
   <div class="wrap row">
     <span>© Girdhar Logistics · Cement Desk</span>
     <span class="grow"></span>
+    <a href="/app/">Web app</a>
     <a href="${PLAY_URL}">Google Play</a>
     <a href="/delete-account">Delete account</a>
   </div>
 </footer>
+
+<div id="ios-sheet" role="dialog" aria-modal="true" aria-labelledby="ios-title">
+  <div class="sheet">
+    <h3 id="ios-title">Add Cement Desk to your Home Screen</h3>
+    <p>Safari does not let a page install itself, so it takes two taps.</p>
+    <ol>
+      <li>Tap the Share button
+        <svg class="share-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3"/><path d="m8 7 4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
+        at the bottom of Safari.</li>
+      <li>Scroll down and choose <b>Add to Home Screen</b>.</li>
+      <li>Tap <b>Add</b>. Cement Desk gets its own icon and opens without Safari around it.</li>
+    </ol>
+    <button type="button" class="close" id="ios-close">Got it</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('[data-install]'));
+  var note = document.getElementById('install-note');
+  var sheet = document.getElementById('ios-sheet');
+  var deferred = null;
+
+  function standalone() {
+    try {
+      if (window.matchMedia('(display-mode: standalone)').matches) return true;
+    } catch (e) { /* older engine */ }
+    return navigator.standalone === true;
+  }
+
+  var ua = navigator.userAgent;
+  // iPadOS 13+ reports a desktop Safari string, so the touch count is what
+  // separates an iPad from a Mac. Chrome and Firefox on iOS are Safari
+  // underneath and behave the same way here.
+  var isApple = /iPhone|iPad|iPod/.test(ua) ||
+    (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+
+  function label(text) {
+    buttons.forEach(function (b) {
+      // Only the text node is replaced, so the arrow glyph in the hero
+      // button survives.
+      var replaced = false;
+      Array.prototype.forEach.call(b.childNodes, function (n) {
+        if (n.nodeType === 3 && n.textContent.trim()) {
+          n.textContent = replaced ? '' : ' ' + text + ' ';
+          replaced = true;
+        }
+      });
+      if (!replaced) b.textContent = text;
+    });
+  }
+
+  function say(text) { if (note) note.textContent = text; }
+
+  // Already installed: the button has nothing to add, so it opens the thing
+  // instead. Same for a desktop browser that will not install — the link it
+  // carries in the markup already works, and is left alone.
+  function markInstalled() {
+    label('Open the web app');
+    say('Cement Desk is installed on this device — open it from your home screen, or tap here.');
+  }
+
+  if (standalone()) markInstalled();
+
+  // Chrome, Edge, Samsung Internet. Firing this event is the browser saying
+  // the page passes every installability check, which is the only reliable
+  // signal there is — so the real install button is only offered here.
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferred = e;
+    label('Add to Home Screen');
+    say('Installs straight from this page. No store, no download, about 7 MB.');
+  });
+
+  window.addEventListener('appinstalled', function () {
+    deferred = null;
+    markInstalled();
+  });
+
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function (event) {
+      if (deferred) {
+        event.preventDefault();
+        deferred.prompt();
+        deferred.userChoice.then(function (choice) {
+          if (choice.outcome !== 'accepted') {
+            // Kept for a second try: the event only fires once per page load.
+            say('No problem — the web app opens in the browser too.');
+          }
+          deferred = null;
+        });
+        return;
+      }
+      if (isApple && !standalone()) {
+        event.preventDefault();
+        sheet.classList.add('open');
+        return;
+      }
+      // Everything else follows the href to /app/, which is the right answer
+      // for a desktop browser and for one that has already installed it.
+    });
+  });
+
+  if (sheet) {
+    document.getElementById('ios-close').addEventListener('click', function () {
+      sheet.classList.remove('open');
+    });
+    sheet.addEventListener('click', function (e) {
+      if (e.target === sheet) sheet.classList.remove('open');
+    });
+  }
+
+  // Chrome will not raise its install prompt on a page no service worker
+  // controls. This one is a pass-through that caches nothing — the PWA's real
+  // worker lives at /app/sw.js. See the backend's webapp module.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('/sw.js').catch(function () { /* fine */ });
+    });
+  }
+})();
+</script>
 
 </body>
 </html>`;

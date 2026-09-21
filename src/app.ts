@@ -13,11 +13,13 @@ import { registerBackupRoutes } from './modules/backup/routes';
 import { registerAccountRoutes } from './modules/account/routes';
 import { registerAdsTxtRoute } from './modules/ads_txt';
 import { registerSiteRoutes } from './modules/site/routes';
+import { registerWebAppRoutes } from './modules/webapp/routes';
 import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
 import { registerBillingRoutes } from './modules/billing/routes';
 import { bumpFirmData, cacheSizes } from './lib/caches';
+import { getConfig } from './config';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -38,6 +40,49 @@ export async function buildApp(): Promise<FastifyInstance> {
     genReqId: () => randomUUID(),
     trustProxy: true,
   });
+
+  // ---- CORS, for local web development only ----
+  //
+  // Off unless WEB_DEV_ORIGINS names an origin, and empty in production,
+  // because the deployed PWA is served from this same host: its calls are
+  // same-origin and a browser never asks about CORS at all.
+  //
+  // What this opens when it is on is narrower than it looks. Every
+  // authenticated route here reads a Bearer token out of a header — there is
+  // no cookie, no session the browser attaches on its own — so a cross-site
+  // page that could reach this API would still have nothing to send. The
+  // origin list exists anyway: `flutter run -d chrome` serves the app from
+  // localhost on a port you choose with --web-port, and this is the only way
+  // it can talk to a real server.
+  const devOrigins = new Set(
+    getConfig().WEB_DEV_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
+  );
+  if (devOrigins.size > 0) {
+    const applyCors = (origin: string | undefined, reply: any): boolean => {
+      if (!origin || !devOrigins.has(origin)) return false;
+      reply.header('access-control-allow-origin', origin);
+      reply.header('vary', 'Origin');
+      reply.header('access-control-allow-headers',
+        'authorization, content-type, idempotency-key, if-match');
+      reply.header('access-control-allow-methods',
+        'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      // Without this the browser hides the header from the app, and the
+      // client's 429 back-off silently falls back to its 5 s default.
+      reply.header('access-control-expose-headers', 'retry-after');
+      reply.header('access-control-max-age', '600');
+      return true;
+    };
+
+    app.addHook('onRequest', async (req, reply) => {
+      if (!req.url.startsWith('/api/v1')) return;
+      const allowed = applyCors(req.headers.origin, reply);
+      if (req.method !== 'OPTIONS') return;
+      // Answer the preflight here rather than routing it: Fastify has no
+      // handler for OPTIONS on these paths and would 404 it, which the
+      // browser reports as a CORS failure with no useful detail.
+      void reply.code(allowed ? 204 : 403).send();
+    });
+  }
 
   // ---- the firm data watermark ----
   //
@@ -120,6 +165,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Also root-level and public: the developer-website URL on the Play listing
   // sends strangers here, and a 404 envelope is not a welcome mat.
   registerSiteRoutes(app);
+
+  // The PWA, at /app/, plus the installability shim at /sw.js that lets the
+  // landing page's "Add to Home Screen" button work. Same origin as the API
+  // on purpose — see the module's header.
+  registerWebAppRoutes(app);
 
   // Also outside /api/v1, and also public: Play requires the deletion route to
   // be reachable in a browser by someone who has already uninstalled the app.

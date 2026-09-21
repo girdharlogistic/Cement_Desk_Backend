@@ -47,6 +47,13 @@ Public endpoints (behind a Cloudflare tunnel):
   check → acknowledge → entitlement. Plans carry feature limits as JSON
   (prices live only on Play). One-time grandfathering preserved `bestLimit`
   limits for early multi-firm/multi-device accounts.
+- **The web app** — the Flutter client, built for the browser, served at
+  `/app/` from `WEBAPP_DIR` (`/home/ubuntu/cementdesk-webapp`, outside both
+  repos). Same origin as the API on purpose: the PWA's requests are
+  same-origin, so no CORS and no second hostname in the tunnel. `/` stays the
+  marketing page and carries the **Add to Home Screen** button; `/sw.js` is
+  the no-op worker that page needs to be installable. Deployed by
+  `tools/build_pwa.sh` **in the app repo** — an rsync, no restart.
 - **Console** — operator web UI: FCM broadcast composer with image upload,
   sponsored-card editor (the app's Home-screen slot), plans CRUD, subscribers
   list, user search, analytics.
@@ -64,7 +71,7 @@ src/
                · validators · num · dates · google_sa (FCM + Play OAuth)
   modules/     auth · firms · masters · freight · stock · landing · sync
                · backup · plans · billing · sponsor · console · site
-               · account · ads_txt
+               · account · ads_txt · webapp (the PWA at /app/)
   jobs/        purge (tombstones/sessions/tokens, every 6 h)
 migrations-sqlite/  live schema, run at boot in filename order
 migrations/         the old TiDB files, kept as history — nothing reads them

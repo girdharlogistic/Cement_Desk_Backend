@@ -33,6 +33,28 @@ const EnvSchema = z.object({
   ARGON2_MEMORY_KB: z.coerce.number().int().default(65536),
   ARGON2_ITERATIONS: z.coerce.number().int().default(3),
 
+  /**
+   * Where the built Flutter web app sits, served at `/app/`.
+   *
+   * Outside both repos for the same reason SQLITE_PATH is: a `git clean` must
+   * not be able to take the product down. It is written by
+   * `tools/build_pwa.sh` in the Android repo, which rsyncs `build/web` here.
+   * A missing directory is not fatal — `/app/` answers 503 and everything
+   * else on this server carries on.
+   */
+  WEBAPP_DIR: z.string().min(1).default('/home/ubuntu/cementdesk-webapp'),
+
+  /**
+   * Extra origins allowed to call `/api/v1` cross-site, comma separated.
+   *
+   * Empty in production and that is correct: the PWA is served from this same
+   * origin, so its requests are same-origin and CORS never enters into it.
+   * This exists for `flutter run -d chrome`, which serves the app from a
+   * random localhost port — see the CORS hook in app.ts for why opening it
+   * is not the risk it looks like.
+   */
+  WEB_DEV_ORIGINS: z.string().default(''),
+
   PORT: z.coerce.number().int().default(8080),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.string().default('info'),

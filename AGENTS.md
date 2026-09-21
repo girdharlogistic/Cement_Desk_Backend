@@ -59,6 +59,35 @@ installed** — the app cannot be built or run on this machine. Use
 useless here (no Flutter SDK to resolve against, so it reports phantom errors
 on untouched files).
 
+### The PWA is deployed from the other repo
+
+`/app/` serves the Flutter web build out of `WEBAPP_DIR`
+(`/home/ubuntu/cementdesk-webapp`), which is **not** in either repo — same
+reason as `SQLITE_PATH`: a `git clean` must not be able to take the product
+down. Deploying it is `tools/build_pwa.sh` in `Cement_Desk_Android`, which
+rsyncs `build/web` there. This service reads the directory per request, so a
+deploy needs **no build and no restart here**. A restart is only needed if you
+changed `src/modules/webapp/` itself.
+
+If `/app/` answers 503 with `WEBAPP_NOT_DEPLOYED`, the directory is missing —
+nothing else on the server is affected, and the fix is to run the app repo's
+deploy script.
+
+Two things about that module are load-bearing and look like mistakes:
+
+- **`Cache-Control: no-cache` on everything.** Flutter's output is not
+  content-hashed (`main.dart.js` keeps its name across builds), so any
+  `max-age` risks pinning a browser to a build that no longer exists. The
+  ETag makes repeat loads 304s, and the app's own service worker is the real
+  cache anyway.
+- **`/sw.js` at the root.** It caches nothing. Chrome will not offer its
+  install prompt on a page no service worker controls, and the "Add to Home
+  Screen" button lives on `/`, which a worker scoped to `/app/` cannot reach.
+
+`WEB_DEV_ORIGINS` is empty in production and should stay that way — it turns
+on a CORS hook for `flutter run -d chrome`, and the deployed app never needs
+it.
+
 ---
 
 ## 2. Round trips: why the caches exist
