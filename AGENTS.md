@@ -80,6 +80,13 @@ Two things about that module are load-bearing and look like mistakes:
   `max-age` risks pinning a browser to a build that no longer exists. The
   ETag makes repeat loads 304s, and the app's own service worker is the real
   cache anyway.
+- **The `.gz` is only served when it is not older than its source.** This cost
+  an afternoon: `flutter build web` rewrites a file and knows nothing about the
+  compressed copy beside it, so a hand-run build leaves a stale `.gz` — and
+  because gzip is what every browser asks for, the *old* bundle is what every
+  browser gets while the new one sits on disk looking correct. The deploy
+  script runs both steps in order; the mtime check is what stops anything else
+  from silently serving last week's app.
 - **`/sw.js` at the root.** It caches nothing. Chrome will not offer its
   install prompt on a page no service worker controls, and the "Add to Home
   Screen" button lives on `/`, which a worker scoped to `/app/` cannot reach.

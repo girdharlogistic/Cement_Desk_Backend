@@ -129,11 +129,23 @@ function sendFile(req: FastifyRequest, reply: FastifyReply, path: string): Fasti
 
   const packed = path + '.gz';
   if (acceptsGzip(req) && existsSync(packed)) {
-    body = packed;
-    encoding = 'gzip';
-    // Sized from the compressed copy on purpose — content-length describes
-    // what goes on the wire, not what comes out the other end.
-    stat = statSync(packed);
+    const packedStat = statSync(packed);
+    // Only if it is not older than what it compresses.
+    //
+    // This cost an afternoon once. `flutter build web` rewrites a file and
+    // knows nothing about the `.gz` beside it, so a build that skips the
+    // compression step leaves a stale copy — and because gzip is what a
+    // browser asks for, the *old* bundle is what every browser gets while
+    // the new one sits there looking correct on disk. The deploy script runs
+    // both steps in order, but nothing can stop someone building by hand,
+    // and silently serving last week's app is not an acceptable failure.
+    if (packedStat.mtimeMs >= stat.mtimeMs) {
+      body = packed;
+      encoding = 'gzip';
+      // Sized from the compressed copy on purpose — content-length describes
+      // what goes on the wire, not what comes out the other end.
+      stat = packedStat;
+    }
   }
 
   // Suffixed for the gzip copy: the same resource in two encodings is two
