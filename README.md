@@ -47,6 +47,10 @@ Public endpoints (behind a Cloudflare tunnel):
   check → acknowledge → entitlement. Plans carry feature limits as JSON
   (prices live only on Play). One-time grandfathering preserved `bestLimit`
   limits for early multi-firm/multi-device accounts.
+- **Update prompt** — `GET /app/version` reads what is live on Play's
+  production track through the Play Developer API (the service account that
+  already releases the app), cached an hour. Nothing to set after a release;
+  the app compares its own `versionCode` and offers the update.
 - **Web push** — `GET /app/push-config` hands a browser the Firebase web
   config it needs to mint a registration token; `POST /me/push-tokens` takes
   that token and joins it to the broadcast topic, which a browser cannot do

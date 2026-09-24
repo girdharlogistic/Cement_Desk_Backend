@@ -18,6 +18,7 @@ import {
   registerPushRoutes,
   registerPushServiceWorkerRoute,
 } from './modules/push/routes';
+import { registerReleaseRoutes } from './modules/release/routes';
 import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
@@ -197,6 +198,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       registerPlanRoutes(api);
       registerBillingRoutes(api);
       registerPushRoutes(api);
+      registerReleaseRoutes(api);
     },
     { prefix: '/api/v1' },
   );

@@ -84,6 +84,64 @@ export function getSubscriptionV2(purchaseToken: string): Promise<SubscriptionPu
   return callPlay('GET', `/purchases/subscriptionsv2/tokens/${encodeURIComponent(purchaseToken)}`);
 }
 
+/** What Play says is live on a track. */
+export interface TrackRelease {
+  versionCode: number;
+  versionName: string;
+}
+
+/**
+ * The build Play is actually serving on the production track.
+ *
+ * Used to tell running installs that a newer one exists. Reading it costs an
+ * *edit* — the Publisher API has no plain "what is live" endpoint, so you open
+ * a transaction, read the track and throw the transaction away. Nothing is
+ * committed, so this changes nothing about the listing; the delete in the
+ * `finally` is only tidiness, as an uncommitted edit expires on its own.
+ *
+ * Only `completed` releases count. A staged rollout is `inProgress` and is
+ * being offered to a fraction of devices — announcing it to everyone would
+ * put an "Update" button in front of people Play will not offer the update
+ * to, which is worse than saying nothing. `halted` and `draft` are excluded
+ * for the same reason.
+ *
+ * Returns null rather than throwing when Play is unreachable or unconfigured:
+ * the caller's answer to "is there an update" is then "we do not know", which
+ * is the right thing to tell an app that is working perfectly well already.
+ */
+export async function liveProductionRelease(): Promise<TrackRelease | null> {
+  const cfg = getConfig();
+  if (!cfg.PLAY_SA_KEY_FILE) return null;
+  let editId: string | undefined;
+  try {
+    const edit = await callPlay('POST', '/edits', {});
+    editId = edit?.id;
+    if (!editId) return null;
+    const track = await callPlay('GET', `/edits/${encodeURIComponent(editId)}/tracks/production`);
+    const releases: any[] = Array.isArray(track?.releases) ? track.releases : [];
+    let best: TrackRelease | null = null;
+    for (const r of releases) {
+      if (r?.status !== 'completed') continue;
+      for (const raw of (r.versionCodes ?? []) as string[]) {
+        const code = Number(raw);
+        if (!Number.isFinite(code)) continue;
+        // A release can carry several version codes (per-ABI splits); the
+        // highest is the one a modern device installs.
+        if (!best || code > best.versionCode) {
+          best = { versionCode: code, versionName: String(r.name ?? '') };
+        }
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  } finally {
+    if (editId) {
+      await callPlay('DELETE', `/edits/${encodeURIComponent(editId)}`).catch(() => {});
+    }
+  }
+}
+
 /**
  * Idempotent, and safe to call on an already-acknowledged purchase — Play answers
  * 204 both ways. The body is an empty object: SubscriptionsAcknowledgeRequest
