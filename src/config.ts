@@ -143,6 +143,18 @@ const EnvSchema = z.object({
    */
   PUBLIC_BASE_URL: z.string().default(''),
 
+  /**
+   * Brevo (HTTP API) is the primary sender, from our own domain; the SMTP
+   * account below is the backup. Brevo's free plan allows 300 mails a day, so
+   * once BREVO_DAILY_LIMIT sends have gone out (UTC day) — or Brevo refuses
+   * one — mail goes through SMTP instead. Empty BREVO_API_KEY = SMTP only.
+   * Never used under vitest: a test run must not spend the day's quota.
+   */
+  BREVO_API_KEY: z.string().default(''),
+  BREVO_SENDER_EMAIL: z.string().default('noreply@girdharlogistics.in'),
+  BREVO_SENDER_NAME: z.string().default('Cement Desk'),
+  BREVO_DAILY_LIMIT: z.coerce.number().int().min(0).default(290),
+
   SMTP_URL: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().optional(),
