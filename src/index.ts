@@ -3,6 +3,7 @@ import { getConfig } from './config';
 import { runMigrations } from './db/migrate';
 import { startJobs } from './jobs/purge';
 import { startBackups } from './jobs/backup';
+import { startReferralChecks } from './modules/referral/service';
 
 async function main(): Promise<void> {
   const cfg = getConfig();
@@ -15,6 +16,7 @@ async function main(): Promise<void> {
   await app.listen({ port: cfg.PORT, host: cfg.HOST });
   if (cfg.ENABLE_JOBS) startJobs();
   startBackups();
+  startReferralChecks();
 
   const shutdown = async (signal: string) => {
     app.log.info({ signal }, 'shutting down');

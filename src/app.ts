@@ -23,6 +23,7 @@ import { registerConsoleRoutes } from './modules/console/routes';
 import { registerSponsorRoutes } from './modules/sponsor/routes';
 import { registerPlanRoutes } from './modules/plans/routes';
 import { registerBillingRoutes } from './modules/billing/routes';
+import { registerReferralRoutes } from './modules/referral/routes';
 import { bumpFirmData, cacheSizes } from './lib/caches';
 import { getConfig } from './config';
 
@@ -197,6 +198,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       registerSponsorRoutes(api);
       registerPlanRoutes(api);
       registerBillingRoutes(api);
+      registerReferralRoutes(api);
       registerPushRoutes(api);
       registerReleaseRoutes(api);
     },

@@ -1088,6 +1088,24 @@ cached entitlement claims.
 
 ---
 
+## 12b. Referrals
+
+All `authenticateVerified`; each answers `{ referral: ReferralSummary }`:
+
+| Route | Body | Notes |
+|---|---|---|
+| `GET /me/referral` | — | Mints the code on first call |
+| `POST /me/referral/apply` | `{ code }` | 422 own code / already referred / already purchased; 400 unknown code. 10/h |
+| `POST /me/referral/claim` | `{ upiId }` | Claims every `qualified` row; 400 bad UPI, 422 nothing to claim. 10/h |
+
+`ReferralSummary`: `code`, `bonusInr`, `enabled`, `canApply`,
+`referredBy: {label} | null`, `referrals: [{id, label, status, bonusInr,
+createdAt, qualifiedAt, claimedAt, paidAt}]`, `claimableInr`,
+`pendingPayoutInr`, `paidInr`. `status` is
+`pending|qualified|claimed|paid|rejected`. A referral qualifies only once the
+referred account's subscription has actually been paid at Play — never during
+a free trial. Show the claim form only when `claimableInr > 0`.
+
 ## 13. Import / export
 
 | Method | Path | Returns | Min role |

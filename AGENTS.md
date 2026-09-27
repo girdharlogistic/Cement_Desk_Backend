@@ -267,6 +267,28 @@ the same validation error in the route.
   still open; the last client check is `canAddFirmProvider`, everything else
   rides on trust until then.
 
+### Refer and earn (2026-09-27)
+
+`modules/referral`, migration `0003`. Every account gets a 7-char code
+(`referral_codes`, minted lazily). A new account applies someone's code
+**before its first Play purchase** (refused after one, refused twice, refused
+for your own). When `/billing/verify` sees that account's purchase it calls
+`noteReferralPurchase`: the row qualifies only if `hasPaid()` (`billing/play.ts`)
+says money moved — **a free trial is not a payment**, nor is grace. Trials are
+re-asked of Play every 6 h by `startReferralChecks()` (not behind
+`ENABLE_JOBS`; that flag guards the purge) because nothing else would ever
+notice a trial converting — no RTDN, and the app only re-verifies uncompleted
+purchases.
+
+Status: `pending → qualified → claimed (UPI given) → paid`, or `rejected`.
+The referrer gets an email on qualify. Payout is **manual**: console →
+Referrals → copy UPI, pay, "Mark paid" with the UTR. `REFERRAL_BONUS_INR`
+(default 200, 0 = off) is pinned onto a row when it qualifies.
+
+Known abuse the server cannot see: one person, two Google accounts. Monthly
+premium is ₹99 and the bonus is ₹200, so a self-referral profits. The console
+review is the only check — look at both emails before paying.
+
 ---
 
 ## 4. Ads (app repo)

@@ -23,6 +23,12 @@ import { sendToTopic } from './fcm';
 import { readStored, storeDataUrl } from './media';
 import { consolePage, loginPage } from './page';
 import { analytics, getUserDetail, listSubscriptions, listUsers } from './users';
+import {
+  listReferrals,
+  markPaid,
+  recheckPendingReferrals,
+  rejectReferral,
+} from '../referral/service';
 
 /**
  * A small web console for sending push notifications, at `/console`.
@@ -511,6 +517,66 @@ export function registerConsoleRoutes(app: FastifyInstance): void {
     invalidateEntitlement(req.params.id);
     req.log.info({ operator, userId: req.params.id }, 'console entitlement revoked');
     return { ok: true };
+  });
+
+  // ── Referrals ────────────────────────────────────────────────────────────
+  //
+  // The payout desk. Nothing here moves money: the operator pays the UPI ID
+  // from their own app and then records it, which is why "paid" takes an
+  // optional UTR — the only thing that settles "did I already pay this one?"
+  // a month later.
+
+  app.get('/console/referrals', async (req, reply) => {
+    if (!enabled()) throw errors.notFound('Route not found');
+    if (!(await currentOperator(req))) {
+      return reply.code(401).send({
+        error: { code: 'UNAUTHENTICATED', message: 'Sign in again.', requestId: req.id },
+      });
+    }
+    return { ok: true, bonusInr: getConfig().REFERRAL_BONUS_INR, rows: await listReferrals() };
+  });
+
+  app.post<{ Params: { id: string } }>('/console/referrals/:id/paid', async (req, reply) => {
+    if (!enabled()) throw errors.notFound('Route not found');
+    const operator = await currentOperator(req);
+    if (!operator) {
+      return reply.code(401).send({
+        error: { code: 'UNAUTHENTICATED', message: 'Sign in again.', requestId: req.id },
+      });
+    }
+    const parsed = z.object({ payoutRef: z.string().trim().max(120).default('') }).safeParse(req.body ?? {});
+    if (!parsed.success) throw errors.validation('Check the payment reference.');
+    await markPaid(req.params.id, parsed.data.payoutRef);
+    req.log.info({ operator, referralId: req.params.id }, 'console referral paid');
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>('/console/referrals/:id/reject', async (req, reply) => {
+    if (!enabled()) throw errors.notFound('Route not found');
+    const operator = await currentOperator(req);
+    if (!operator) {
+      return reply.code(401).send({
+        error: { code: 'UNAUTHENTICATED', message: 'Sign in again.', requestId: req.id },
+      });
+    }
+    const parsed = z.object({ note: z.string().trim().max(200).default('') }).safeParse(req.body ?? {});
+    if (!parsed.success) throw errors.validation('Check the reason.');
+    await rejectReferral(req.params.id, parsed.data.note);
+    req.log.info({ operator, referralId: req.params.id }, 'console referral rejected');
+    return { ok: true };
+  });
+
+  /** Ask Play now about trials, instead of waiting for the six-hourly pass. */
+  app.post('/console/referrals/recheck', async (req, reply) => {
+    if (!enabled()) throw errors.notFound('Route not found');
+    const operator = await currentOperator(req);
+    if (!operator) {
+      return reply.code(401).send({
+        error: { code: 'UNAUTHENTICATED', message: 'Sign in again.', requestId: req.id },
+      });
+    }
+    enforceLimit(`console:referral-recheck:${operator}`, 20, 3600_000);
+    return { ok: true, ...(await recheckPendingReferrals()) };
   });
 
   app.get<{ Params: { name: string } }>('/media/:name', async (req, reply) => {

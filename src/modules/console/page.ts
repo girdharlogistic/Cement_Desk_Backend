@@ -223,6 +223,7 @@ export const consolePage = (opts: {
   <button class="tab" data-tab="sponsor" role="tab" type="button">Sponsored card</button>
   <button class="tab" data-tab="plans" role="tab" type="button">Plans</button>
   <button class="tab" data-tab="subs" role="tab" type="button">Subscribers</button>
+  <button class="tab" data-tab="refs" role="tab" type="button">Referrals</button>
   <button class="tab" data-tab="users" role="tab" type="button">User data feed</button>
   <button class="tab" data-tab="analytics" role="tab" type="button">Users & analysis</button>
 </div>
@@ -511,6 +512,39 @@ export const consolePage = (opts: {
   </form>
 </div>
 
+<div id="panel-refs" hidden>
+  <div class="stat-grid" id="rf-stats"></div>
+  <div class="row">
+    <select id="rf-filter" style="width:auto">
+      <option value="claimed">To pay — UPI submitted</option>
+      <option value="qualified">Completed, not claimed yet</option>
+      <option value="pending">Pending — referee has not paid yet</option>
+      <option value="paid">Paid</option>
+      <option value="rejected">Rejected</option>
+      <option value="">All</option>
+    </select>
+    <span class="grow"></span>
+    <button class="ghost" id="rf-recheck" type="button">Re-check trials with Play</button>
+  </div>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr>
+        <th>Referrer</th><th>Referred</th><th>Plan</th><th>Status</th><th>Bonus</th>
+        <th>UPI ID</th><th>Dates</th><th></th>
+      </tr></thead>
+      <tbody id="rf-body"></tbody>
+    </table>
+  </div>
+  <div class="msg" id="rf-msg"></div>
+  <div class="warn">
+    A referral completes only when the referred account has <b>paid</b> Google Play —
+    a free trial does not count, and trials are re-checked every six hours.
+    Before paying, glance at both emails: nothing stops one person making a second
+    account to refer themselves, and a monthly plan costs less than the bonus.
+    Pay the UPI ID from your own app, then press <b>Mark paid</b> and paste the UTR.
+  </div>
+</div>
+
 <div id="panel-analytics" hidden>
   <div class="stat-grid" id="an-stats"></div>
   <div class="hint" style="margin-top:20px">Sign-ups, last 30 days</div>
@@ -614,6 +648,7 @@ ${TABS_JS}
 ${SPONSOR_JS}
 ${USERS_JS}
 ${ANALYTICS_JS}
+${REFERRALS_JS}
 </script>`,
   );
 
@@ -626,6 +661,7 @@ const HEADS = {
   sponsor: ['Sponsored card', 'The card at the top of Home, on every install.'],
   plans: ['Plans', 'How many plans there are and what each one unlocks. Prices live in Play Console.'],
   subs: ['Subscribers', 'Who is paying, who was comped, and who let it lapse.'],
+  refs: ['Referrals', 'Completed referrals and the UPI payouts they are owed.'],
   users: ['User data feed', 'Browse every account, search it, and open one for the full picture.'],
   analytics: ['Users & analysis', 'Platform-wide numbers: growth, activity, and the busiest books.'],
 };
@@ -972,10 +1008,10 @@ function subRow(s, showEnd) {
   tr.appendChild(st);
   let end = 'no expiry';
   if (s.daysLeft !== null && s.daysLeft !== undefined) {
-    if (showEnd) end = fmt(s.expiresAt);
+    if (showEnd) end = fmtDate(s.expiresAt);
     else if (s.daysLeft === 0) end = 'ends today';
-    else if (s.daysLeft > 0) end = s.daysLeft + 'd left · ' + fmt(s.expiresAt);
-    else end = 'ended ' + fmt(s.expiresAt);
+    else if (s.daysLeft > 0) end = s.daysLeft + 'd left · ' + fmtDate(s.expiresAt);
+    else end = 'ended ' + fmtDate(s.expiresAt);
   }
   tr.appendChild(el('td', 'sub', end));
   return tr;
@@ -1009,10 +1045,7 @@ async function loadSubs() {
     ['Free tier', j.freeTierCount],
   ];
   for (const [label, n] of items) {
-    const box = el('div', 'stat');
-    box.appendChild(el('div', 'num', String(n)));
-    box.appendChild(el('div', 'lbl', label));
-    stat.appendChild(box);
+    stat.appendChild(statTile(label, n));
   }
   fillSubTable('sub-live-body', j.live, 'Nobody is paying yet.');
   fillSubTable('sub-grant-body', j.grantLive, 'No hand-grants running.');
@@ -1400,6 +1433,147 @@ TAB_INIT.analytics = function () {
   analyticsLoaded = true;
   loadAnalytics();
 };
+`;
+
+/**
+ * Referral payouts. Lazy like the rest; the default filter is the work queue —
+ * rows with a UPI ID waiting for money.
+ */
+const REFERRALS_JS = `
+let rfRows = [];
+
+function rfMsg(text, ok) {
+  const m = $('rf-msg');
+  m.textContent = text;
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+}
+
+async function rfPost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (r.status === 401) { location.href = '/console'; return null; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { rfMsg((j.error && j.error.message) || 'That did not work.', false); return null; }
+  return j;
+}
+
+const RF_LABEL = {
+  pending: 'pending', qualified: 'completed', claimed: 'to pay', paid: 'paid', rejected: 'rejected',
+};
+
+function drawReferrals() {
+  const want = $('rf-filter').value;
+  const body = $('rf-body');
+  body.textContent = '';
+  const rows = rfRows.filter((r) => !want || r.status === want);
+  if (!rows.length) {
+    const tr = el('tr');
+    const td = el('td', 'sub', 'Nothing here.');
+    td.colSpan = 8;
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const r of rows) {
+    const tr = el('tr');
+    const a = el('td', null, r.referrerEmail); a.style.cursor = 'pointer';
+    a.addEventListener('click', () => openUser(r.referrerId));
+    const b = el('td', null, r.refereeEmail); b.style.cursor = 'pointer';
+    b.addEventListener('click', () => openUser(r.refereeId));
+    tr.appendChild(a); tr.appendChild(b);
+    tr.appendChild(el('td', null, r.planPeriod === 'month' ? 'Monthly' : r.planPeriod === 'year' ? 'Yearly' : (r.planPeriod || '—')));
+    const st = el('td');
+    st.appendChild(el('span', 'pill ' + (r.status === 'rejected' ? 'bad' : 'ok'), RF_LABEL[r.status] || r.status));
+    tr.appendChild(st);
+    tr.appendChild(el('td', null, r.status === 'pending' ? '—' : '₹' + r.bonusInr));
+
+    const upi = el('td');
+    if (r.upiId) {
+      upi.appendChild(el('span', null, r.upiId + ' '));
+      const copy = el('button', 'ghost', 'Copy');
+      copy.type = 'button';
+      copy.style.padding = '3px 9px';
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(r.upiId); rfMsg('Copied ' + r.upiId, true); }
+        catch { rfMsg('Could not copy — select it by hand.', false); }
+      });
+      upi.appendChild(copy);
+    } else upi.textContent = '—';
+    tr.appendChild(upi);
+
+    const dates = [];
+    dates.push('referred ' + fmtDate(r.createdAt));
+    if (r.qualifiedAt) dates.push('completed ' + fmtDate(r.qualifiedAt));
+    if (r.claimedAt) dates.push('claimed ' + fmtDate(r.claimedAt));
+    if (r.paidAt) dates.push('paid ' + fmtDate(r.paidAt) + (r.payoutRef ? ' · ' + r.payoutRef : ''));
+    if (r.note) dates.push('note: ' + r.note);
+    const d = el('td', 'sub', dates.join('\\n')); d.style.whiteSpace = 'pre-line';
+    tr.appendChild(d);
+
+    const act = el('td');
+    if (r.status === 'claimed') {
+      const pay = el('button', null, 'Mark paid');
+      pay.type = 'button'; pay.style.padding = '5px 11px';
+      pay.addEventListener('click', async () => {
+        const ref = prompt('Paid ₹' + r.bonusInr + ' to ' + r.upiId + '?\\nUTR / reference (optional):', '');
+        if (ref === null) return;
+        if (await rfPost('/console/referrals/' + r.id + '/paid', { payoutRef: ref })) {
+          rfMsg('Marked paid.', true); loadReferrals();
+        }
+      });
+      act.appendChild(pay);
+    }
+    if (r.status === 'pending' || r.status === 'qualified' || r.status === 'claimed') {
+      const rej = el('button', 'ghost', 'Reject');
+      rej.type = 'button'; rej.style.padding = '5px 11px'; rej.style.marginLeft = '6px';
+      rej.addEventListener('click', async () => {
+        const note = prompt('Reject this referral? Reason (the referrer will see it as rejected):', '');
+        if (note === null) return;
+        if (await rfPost('/console/referrals/' + r.id + '/reject', { note })) {
+          rfMsg('Rejected.', true); loadReferrals();
+        }
+      });
+      act.appendChild(rej);
+    }
+    tr.appendChild(act);
+    body.appendChild(tr);
+  }
+}
+
+async function loadReferrals() {
+  const r = await fetch('/console/referrals', { credentials: 'same-origin' });
+  if (r.status === 401) { location.href = '/console'; return; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return;
+  rfRows = j.rows || [];
+  const count = (s) => rfRows.filter((x) => x.status === s);
+  const owed = count('claimed').reduce((a, x) => a + x.bonusInr, 0);
+  const paid = count('paid').reduce((a, x) => a + x.bonusInr, 0);
+  const grid = $('rf-stats');
+  grid.textContent = '';
+  for (const [l, n] of [
+    ['To pay', count('claimed').length], ['Owed now', '₹' + owed],
+    ['Not claimed', count('qualified').length], ['Pending', count('pending').length],
+    ['Paid out', '₹' + paid], ['Bonus each', '₹' + j.bonusInr],
+  ]) grid.appendChild(statTile(l, n));
+  drawReferrals();
+}
+
+$('rf-filter').addEventListener('change', drawReferrals);
+$('rf-recheck').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  const j = await rfPost('/console/referrals/recheck');
+  e.target.disabled = false;
+  if (j) { rfMsg('Checked ' + j.checked + ' trial(s) with Play; ' + j.qualified + ' completed.', true); loadReferrals(); }
+});
+
+// Reloaded on every visit, not once: this is a queue, and one that was
+// loaded an hour ago is how a payout gets made twice.
+TAB_INIT.refs = loadReferrals;
 `;
 
 /**

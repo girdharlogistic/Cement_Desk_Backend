@@ -98,6 +98,14 @@ const EnvSchema = z.object({
    */
   PLAY_RTDN_SECRET: z.string().default(''),
 
+  /**
+   * The cash a referrer earns, in rupees, once somebody they referred has
+   * actually paid for premium. Copied onto each referral row when it
+   * qualifies, so changing this never changes what was already promised.
+   * 0 switches the programme off: codes can no longer be applied.
+   */
+  REFERRAL_BONUS_INR: z.coerce.number().int().min(0).max(100_000).default(200),
+
   // ---- notification console (/console) ----
   // A login of its own, deliberately unrelated to any app account: this page
   // can push a notification to every install, and no firm role should ever

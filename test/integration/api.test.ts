@@ -8,7 +8,7 @@
  * it. The database is a file now, so the suite makes its own in a temp
  * directory on every run and deletes it afterwards. No gate, no setup.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -551,5 +551,101 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     const del = await api('DELETE', `/firms/${solo.firm.id}`, undefined, solo.tokens.accessToken);
     expect(del.status).toBe(409);
     expect(del.body.error.code).toBe('LAST_FIRM');
+  });
+});
+
+describe('integration: refer and earn', () => {
+  // Signup is limited to five an hour per IP, and every account in this file
+  // comes from the same one.
+  beforeEach(async () => {
+    (await import('../../src/lib/limiter'))._resetLimiters();
+  });
+
+  // A purchase as Play would describe it, past any trial — `hasPaid` is what
+  // turns it into a completed referral. The route that calls it needs a live
+  // Play key, so the hook is driven directly with Play's answer in hand.
+  const paid = {
+    subscriptionState: 'SUBSCRIPTION_STATE_ACTIVE',
+    lineItems: [{ productId: 'premium', expiryTime: '2999-01-01T00:00:00Z', offerPhase: { basePrice: {} } }],
+  };
+  const trial = {
+    subscriptionState: 'SUBSCRIPTION_STATE_ACTIVE',
+    lineItems: [{ productId: 'premium', expiryTime: '2999-01-01T00:00:00Z', offerPhase: { freeTrial: {} } }],
+  };
+
+  it('code → apply → trial does not count → paid qualifies → claim → console pays', async () => {
+    const ref = await import('../../src/modules/referral/service');
+    const a = await signUpVerified('referrer', { displayName: 'Referrer A', firmName: 'Ref A' });
+    const b = await signUpVerified('referee', { displayName: 'Referee B', firmName: 'Ref B' });
+    const tA = a.tokens.accessToken;
+    const tB = b.tokens.accessToken;
+
+    const sa = await api('GET', '/me/referral', undefined, tA);
+    expect(sa.status).toBe(200);
+    const code: string = sa.body.referral.code;
+    expect(code).toMatch(/^[A-Z2-9]{7}$/);
+    expect(sa.body.referral.bonusInr).toBe(200);
+    // Stable across reads — minted once.
+    expect((await api('GET', '/me/referral', undefined, tA)).body.referral.code).toBe(code);
+
+    // Own code, unknown code.
+    expect((await api('POST', '/me/referral/apply', { code }, tA)).status).toBe(422);
+    expect((await api('POST', '/me/referral/apply', { code: 'ZZZZZZZ' }, tB)).status).toBe(400);
+
+    // Lower case with a space is still the code somebody read off WhatsApp.
+    const applied = await api('POST', '/me/referral/apply', { code: ` ${code.toLowerCase()}` }, tB);
+    expect(applied.status).toBe(200);
+    expect(applied.body.referral.canApply).toBe(false);
+    expect(applied.body.referral.referredBy.label).toBe('Referrer A');
+    // Only one referrer, ever.
+    expect((await api('POST', '/me/referral/apply', { code }, tB)).status).toBe(422);
+
+    // Nothing to claim while pending.
+    expect((await api('POST', '/me/referral/claim', { upiId: 'a@okaxis' }, tA)).status).toBe(422);
+
+    // A free trial is not a payment.
+    await ref.noteReferralPurchase(b.user.id, 'tok-referee', trial as any, 'month');
+    let s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
+    expect(s.referrals[0].status).toBe('pending');
+    expect(s.claimableInr).toBe(0);
+
+    // The trial converts.
+    await ref.noteReferralPurchase(b.user.id, 'tok-referee', paid as any, 'month');
+    s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
+    expect(s.referrals[0].status).toBe('qualified');
+    expect(s.claimableInr).toBe(200);
+
+    // Bad UPI, then a good one.
+    expect((await api('POST', '/me/referral/claim', { upiId: 'not a upi' }, tA)).status).toBe(400);
+    const claimed = await api('POST', '/me/referral/claim', { upiId: ' Rahul.Sharma@OKAXIS ' }, tA);
+    expect(claimed.status).toBe(200);
+    expect(claimed.body.referral.claimableInr).toBe(0);
+    expect(claimed.body.referral.pendingPayoutInr).toBe(200);
+
+    const rows = await ref.listReferrals();
+    const row = rows.find((r) => r.referrerId === a.user.id)!;
+    expect(row.status).toBe('claimed');
+    expect(row.upiId).toBe('rahul.sharma@okaxis');
+    await expect(ref.rejectReferral('nope', '')).rejects.toThrow();
+    await ref.markPaid(row.id, 'UTR123');
+    await expect(ref.markPaid(row.id, 'again')).rejects.toThrow();
+    s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
+    expect(s.paidInr).toBe(200);
+    expect(s.referrals[0].status).toBe('paid');
+  });
+
+  it('a code cannot be applied after a purchase', async () => {
+    const a = await signUpVerified('referrer2', { displayName: 'R2', firmName: 'R2' });
+    const c = await signUpVerified('buyer', { displayName: 'Buyer', firmName: 'Buyer' });
+    const code = (await api('GET', '/me/referral', undefined, a.tokens.accessToken)).body.referral.code;
+    const { q } = await import('../../src/db/pool');
+    await q(
+      `INSERT INTO entitlements (user_id, plan_id, source, status, purchase_token) VALUES (?, NULL, 'play', 'active', 'tok-buyer')`,
+      [c.user.id],
+    );
+    const s = (await api('GET', '/me/referral', undefined, c.tokens.accessToken)).body.referral;
+    expect(s.canApply).toBe(false);
+    const res = await api('POST', '/me/referral/apply', { code }, c.tokens.accessToken);
+    expect(res.status).toBe(422);
   });
 });

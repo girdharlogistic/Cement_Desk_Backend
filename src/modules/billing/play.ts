@@ -32,6 +32,17 @@ export interface SubscriptionPurchaseV2 {
     /** RFC3339 instant when this line item stops being paid-for. */
     expiryTime?: string;
     offerDetails?: { basePlanId?: string; offerId?: string };
+    /**
+     * Which pricing phase the line item is in right now. Exactly one member is
+     * set. Newer than the rest of this resource — older responses omit it, so
+     * [hasPaid] falls back to the offer id when it is missing.
+     */
+    offerPhase?: {
+      basePrice?: object;
+      introductoryPrice?: object;
+      freeTrial?: object;
+      prorationPeriod?: object;
+    };
   }>;
   /** Present when this token was replaced by a newer one (upgrade/downgrade). */
   linkedPurchaseToken?: string;
@@ -183,6 +194,44 @@ export function entitlementStatus(
       // not paid for right now. Play does not say "maybe".
       return null;
   }
+}
+
+/**
+ * Whether money has actually changed hands for this subscription — which is a
+ * different question from [entitlementStatus]'s "may they use premium".
+ *
+ * It exists for the referral bonus, which is cash out of our pocket: paying
+ * ₹200 for a free trial that is cancelled on day two would be paying people to
+ * start trials. So:
+ *
+ * - Only ACTIVE counts, and CANCELED while still paid-through (they paid, then
+ *   switched renewal off). GRACE is a charge that is *failing* — not yet.
+ * - In a free-trial phase nothing has been charged.
+ * - Without `offerPhase` (older responses), a trial offer counts as paid only
+ *   once its length has run out since `startTime` and Play still calls it
+ *   active — that is Play having charged the first period. The length comes
+ *   from the offer id (`trial30` → 30 days), 30 when it does not say.
+ */
+export function hasPaid(p: SubscriptionPurchaseV2, now: number = Date.now()): boolean {
+  const item = p.lineItems?.[0];
+  if (!item) return false;
+  const paidThrough = item.expiryTime ? Date.parse(item.expiryTime) : NaN;
+  const live =
+    p.subscriptionState === 'SUBSCRIPTION_STATE_ACTIVE' ||
+    (p.subscriptionState === 'SUBSCRIPTION_STATE_CANCELED' &&
+      Number.isFinite(paidThrough) &&
+      paidThrough > now);
+  if (!live) return false;
+
+  const phase = item.offerPhase;
+  if (phase) return !phase.freeTrial;
+
+  const offerId = item.offerDetails?.offerId ?? '';
+  if (!/trial/i.test(offerId)) return true;
+  const days = Number(/(\d+)/.exec(offerId)?.[1] ?? 30) || 30;
+  const started = p.startTime ? Date.parse(p.startTime) : NaN;
+  if (!Number.isFinite(started)) return false;
+  return now >= started + days * 86_400_000;
 }
 
 /**

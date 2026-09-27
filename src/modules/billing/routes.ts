@@ -7,6 +7,7 @@ import { parse } from '../../lib/validate';
 import { authenticate } from '../../plugins/guards';
 import { listPlans, readEntitlementByToken, upsertEntitlement } from '../plans/repo';
 import { entitlementOf, invalidateEntitlement } from '../plans/service';
+import { noteReferralPurchase } from '../referral/service';
 import {
   acknowledgeSubscription,
   entitlementStatus,
@@ -122,6 +123,10 @@ export function registerBillingRoutes(app: FastifyInstance): void {
       note: '',
     });
     invalidateEntitlement(req.userId);
+
+    // After the grant, and unable to fail it: whoever referred this account
+    // earns their bonus once Play has actually been paid (not for a trial).
+    await noteReferralPurchase(req.userId, purchaseToken, purchase, plan.period);
 
     // Fresh from the database: the caller unlocks on this response, so it must
     // not be the entitlement that was cached before the purchase.
