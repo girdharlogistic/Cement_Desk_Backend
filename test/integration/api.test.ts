@@ -609,8 +609,19 @@ describe('integration: refer and earn', () => {
     expect(s.referrals[0].status).toBe('pending');
     expect(s.claimableInr).toBe(0);
 
-    // The trial converts.
+    // Paid, but monthly: no bonus.
     await ref.noteReferralPurchase(b.user.id, 'tok-referee', paid as any, 'month');
+    s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
+    expect(s.referrals[0].status).toBe('pending');
+    expect(s.referrals[0].planPeriod).toBe('month');
+
+    // A yearly trial is not paid yet either.
+    await ref.noteReferralPurchase(b.user.id, 'tok-referee-y', trial as any, 'year');
+    s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
+    expect(s.referrals[0].status).toBe('pending');
+
+    // The yearly trial converts.
+    await ref.noteReferralPurchase(b.user.id, 'tok-referee-y', paid as any, 'year');
     s = (await api('GET', '/me/referral', undefined, tA)).body.referral;
     expect(s.referrals[0].status).toBe('qualified');
     expect(s.claimableInr).toBe(200);

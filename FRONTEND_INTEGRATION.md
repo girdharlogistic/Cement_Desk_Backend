@@ -1103,8 +1103,9 @@ All `authenticateVerified`; each answers `{ referral: ReferralSummary }`:
 createdAt, qualifiedAt, claimedAt, paidAt}]`, `claimableInr`,
 `pendingPayoutInr`, `paidInr`. `status` is
 `pending|qualified|claimed|paid|rejected`. A referral qualifies only once the
-referred account's subscription has actually been paid at Play — never during
-a free trial. Show the claim form only when `claimableInr > 0`.
+referred account's **yearly** subscription has actually been paid at Play —
+never during a free trial, never on monthly. Each referral carries
+`planPeriod` (`month`/`year`, '' before purchase). Show the claim form only when `claimableInr > 0`.
 
 ## 13. Import / export
 

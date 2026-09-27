@@ -539,8 +539,9 @@ export const consolePage = (opts: {
   <div class="warn">
     A referral completes only when the referred account has <b>paid</b> Google Play —
     a free trial does not count, and trials are re-checked every six hours.
-    Before paying, glance at both emails: nothing stops one person making a second
-    account to refer themselves, and a monthly plan costs less than the bonus.
+    Only the <b>yearly</b> plan earns a bonus; a monthly referee stays pending unless they
+    switch to yearly. Before paying, glance at both emails: nothing stops one person
+    making a second account to refer themselves.
     Pay the UPI ID from your own app, then press <b>Mark paid</b> and paste the UTR.
   </div>
 </div>

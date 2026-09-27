@@ -26,7 +26,27 @@ import { getSubscriptionV2, hasPaid, SubscriptionPurchaseV2 } from '../billing/p
  *   and why nothing is paid automatically.)
  * - Qualifying needs real money at Play. Trials are re-checked by
  *   [recheckPendingReferrals] once they could have converted.
+ * - Only the **yearly** plan earns a bonus (operator's decision, 2026-09-27).
+ *   Monthly is ₹99 against a ₹200 bonus, so a second account referring
+ *   yourself on monthly would be a profit. A monthly referee stays `pending`;
+ *   if they later move to yearly, Play issues a new token, the app verifies
+ *   it, and the row qualifies then.
  */
+
+/** Plan periods whose purchase earns the referrer a bonus. */
+export const QUALIFYING_PERIODS: readonly string[] = ['year'];
+
+/** Play's base-plan id as a plan period — the same aliases as `pickPlan`. */
+function periodOf(p: SubscriptionPurchaseV2): string | null {
+  const id = p.lineItems?.[0]?.offerDetails?.basePlanId;
+  if (!id) return null;
+  return ({ monthly: 'month', yearly: 'year' } as Record<string, string>)[id] ?? id;
+}
+
+/** Whether this purchase, on this plan period, earns the referrer their bonus. */
+export function qualifiesForBonus(p: SubscriptionPurchaseV2, planPeriod: string): boolean {
+  return QUALIFYING_PERIODS.includes(planPeriod) && hasPaid(p);
+}
 
 export type ReferralStatus = 'pending' | 'qualified' | 'claimed' | 'paid' | 'rejected';
 
@@ -109,6 +129,8 @@ export interface MyReferral {
   label: string;
   status: ReferralStatus;
   bonusInr: number;
+  /** `month` / `year` once they have bought, '' before. */
+  planPeriod: string;
   createdAt: string;
   qualifiedAt: string | null;
   claimedAt: string | null;
@@ -169,6 +191,7 @@ export async function referralSummary(userId: string): Promise<ReferralSummary> 
     status: r.status,
     // A pending row has no bonus pinned yet; show what it would earn today.
     bonusInr: r.status === 'pending' ? bonus() : Number(r.bonus_inr),
+    planPeriod: r.plan_period ?? '',
     createdAt: sqlToIso(r.created_at)!,
     qualifiedAt: sqlToIso(r.qualified_at),
     claimedAt: sqlToIso(r.claimed_at),
@@ -257,7 +280,7 @@ export async function noteReferralPurchase(
       planPeriod,
       row.id,
     ]);
-    if (hasPaid(purchase)) await qualify(row.id);
+    if (qualifiesForBonus(purchase, planPeriod)) await qualify(row.id);
   } catch (e) {
     console.error('[referral] could not note purchase', (e as Error).message);
   }
@@ -282,7 +305,7 @@ async function qualify(id: string): Promise<boolean> {
     sendMailBestEffort(
       who.email,
       `Your ₹${who.bonus_inr} Cement Desk referral bonus is ready`,
-      `Someone you referred has just subscribed to Cement Desk Premium.\n\n` +
+      `Someone you referred has just bought a yearly Cement Desk Premium plan.\n\n` +
         `Open the app → More → Refer & earn, and enter your UPI ID to claim ` +
         `₹${who.bonus_inr}. It reaches you within 24–48 hours.\n\n— Cement Desk`,
     );
@@ -298,16 +321,19 @@ async function qualify(id: string): Promise<boolean> {
  */
 export async function recheckPendingReferrals(): Promise<{ checked: number; qualified: number }> {
   if (!getConfig().PLAY_SA_KEY_FILE) return { checked: 0, qualified: 0 };
-  const rows = await q<{ id: string; purchase_token: string }>(
-    `SELECT id, purchase_token FROM referrals
-      WHERE status = 'pending' AND purchase_token != ''
+  // Monthly rows are skipped: they can only qualify through a new purchase
+  // (a switch to yearly), and that arrives through /billing/verify.
+  const rows = await q<{ id: string; purchase_token: string; plan_period: string }>(
+    `SELECT id, purchase_token, plan_period FROM referrals
+      WHERE status = 'pending' AND purchase_token != '' AND plan_period != 'month'
       ORDER BY created_at ASC LIMIT 500`,
   );
   let qualified = 0;
   for (const r of rows) {
     try {
       const p = await getSubscriptionV2(r.purchase_token);
-      if (hasPaid(p) && (await qualify(r.id))) qualified++;
+      const period = periodOf(p) ?? r.plan_period;
+      if (qualifiesForBonus(p, period) && (await qualify(r.id))) qualified++;
     } catch (e) {
       // One bad token (refunded, revoked) must not stop the rest.
       console.error(`[referral] recheck ${r.id} failed: ${(e as Error).message}`);

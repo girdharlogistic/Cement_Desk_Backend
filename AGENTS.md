@@ -285,9 +285,11 @@ The referrer gets an email on qualify. Payout is **manual**: console →
 Referrals → copy UPI, pay, "Mark paid" with the UTR. `REFERRAL_BONUS_INR`
 (default 200, 0 = off) is pinned onto a row when it qualifies.
 
-Known abuse the server cannot see: one person, two Google accounts. Monthly
-premium is ₹99 and the bonus is ₹200, so a self-referral profits. The console
-review is the only check — look at both emails before paying.
+**Only the yearly plan earns a bonus** (`QUALIFYING_PERIODS`, operator's call
+on 2026-09-27): monthly is ₹99 against a ₹200 bonus, so a self-referral from a
+second Google account would profit. A monthly referee stays `pending`; a later
+switch to yearly is a new Play token, verified by the app, and qualifies then.
+Two accounts on yearly is still possible — the console review is the check.
 
 ---
 

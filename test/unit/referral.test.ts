@@ -86,3 +86,13 @@ describe('referral codes and UPI IDs', () => {
     expect(maskEmail('r@x.in')).toBe('r•••@x.in');
   });
 });
+
+describe('qualifiesForBonus — yearly only', () => {
+  it('pays for a paid yearly plan, not a paid monthly one', async () => {
+    const { qualifiesForBonus } = await import('../../src/modules/referral/service');
+    const p = sub('SUBSCRIPTION_STATE_ACTIVE', { offerPhase: { basePrice: {} } });
+    expect(qualifiesForBonus(p, 'year')).toBe(true);
+    expect(qualifiesForBonus(p, 'month')).toBe(false);
+    expect(qualifiesForBonus(sub('SUBSCRIPTION_STATE_ACTIVE', { offerPhase: { freeTrial: {} } }), 'year')).toBe(false);
+  });
+});
