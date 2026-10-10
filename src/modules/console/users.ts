@@ -273,7 +273,8 @@ export async function listSubscriptions(): Promise<Subscriptions> {
     const expiresAt = sqlToIso(r.expires_at);
     const isLive =
       (r.status === 'active' || r.status === 'grace') &&
-      (!r.expires_at || Date.parse(r.expires_at) > now);
+      // sqlToIso, not the raw column: a zoneless string parses as local time.
+      (!r.expires_at || Date.parse(expiresAt!) > now);
     const row: SubscriptionRow = {
       userId: r.user_id,
       email: r.email,
@@ -283,7 +284,7 @@ export async function listSubscriptions(): Promise<Subscriptions> {
       status: r.status,
       expiresAt,
       daysLeft: r.expires_at
-        ? Math.floor((Date.parse(r.expires_at) - now) / 86_400_000)
+        ? Math.floor((Date.parse(expiresAt!) - now) / 86_400_000)
         : null,
       note: r.note ?? '',
     };

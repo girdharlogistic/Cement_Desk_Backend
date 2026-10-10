@@ -272,7 +272,12 @@ export async function refresh(rawRefreshToken: string): Promise<{ tokens: Omit<S
     while (
       cur.revoked_at &&
       cur.replaced_by &&
-      Date.now() - new Date(cur.revoked_at).getTime() <= REFRESH_REUSE_GRACE_MS &&
+      // revoked_at is a UTC 'YYYY-MM-DD HH:mm:ss.SSS' with no zone, and
+      // `new Date()` reads a zoneless string as *local* time. On a box set to
+      // IST that put every rotation 5½ hours in the past, the grace window
+      // never applied, and an ordinary retried refresh logged the user out of
+      // every device. sqlToIso pins it to UTC.
+      Date.now() - Date.parse(sqlToIso(cur.revoked_at)!) <= REFRESH_REUSE_GRACE_MS &&
       hops++ < 5
     ) {
       const next = await qOne<any>('SELECT * FROM sessions WHERE id = ?', [cur.replaced_by]);
