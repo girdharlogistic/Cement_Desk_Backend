@@ -1,6 +1,7 @@
 import { q, qOne } from '../../db/pool';
 import { enumToLegacy } from './enumMaps';
 import { num } from '../../lib/num';
+import { exportDepot } from '../depot/backup';
 
 /**
  * GET /firms/{firmId}/export/backup — produces the v3 JSON shape the client's
@@ -37,6 +38,11 @@ export async function exportBackup(firmId: string): Promise<any> {
   const claims = await grab<any>('SELECT * FROM claims WHERE firm_id = ? ORDER BY period_from', [firmId]);
   const notes = await grab<any>('SELECT * FROM claim_credit_notes WHERE firm_id = ? ORDER BY date', [firmId]);
   const counter = await grab<any>('SELECT freight_serial FROM firm_counters WHERE firm_id = ?', [firmId]);
+  const labours = await grab<any>('SELECT * FROM labours WHERE firm_id = ? ORDER BY sort_order', [firmId]);
+  const depotSettings = await grab<any>('SELECT * FROM depot_settings WHERE firm_id = ?', [firmId]);
+  const depotTrucks = await grab<any>('SELECT * FROM depot_trucks WHERE firm_id = ? ORDER BY date', [firmId]);
+  const depotDispatches = await grab<any>('SELECT * FROM depot_dispatches WHERE firm_id = ? ORDER BY date', [firmId]);
+  const depotAdjustments = await grab<any>('SELECT * FROM depot_adjustments WHERE firm_id = ? ORDER BY date', [firmId]);
 
   const d = (r: any) => (r.deleted_at ? true : false);
   const live = (rows: any[]) => rows.filter((r) => !d(r));
@@ -62,6 +68,10 @@ export async function exportBackup(firmId: string): Promise<any> {
     : null;
 
   return {
+    // Still 3, although the diary keys below are newer: an app build from
+    // before the diary refuses a file whose version is above its own, and it
+    // reads every key it knows regardless of the number. Unknown keys are
+    // simply ignored there, so 3 restores everywhere and loses nothing new.
     schemaVersion: 3,
     exportedAt: new Date().toISOString(),
     firms: [{ id: firm.id, name: firm.name }],
@@ -128,5 +138,6 @@ export async function exportBackup(firmId: string): Promise<any> {
       sentOn: r.sent_on,
       creditNotes: notes.filter((n) => n.claim_id === r.id).map((n) => ({ id: n.id, date: n.date, number: n.number, amount: num(n.amount) })),
     })),
+    ...exportDepot(firmId, labours, depotSettings, depotTrucks, depotDispatches, depotAdjustments),
   };
 }

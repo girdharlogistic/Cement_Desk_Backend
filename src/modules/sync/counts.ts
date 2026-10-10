@@ -28,6 +28,11 @@ const TABLES: Record<string, string> = {
   schemeFolders: 'scheme_folders',
   schemes: 'schemes',
   claims: 'claims',
+  labours: 'labours',
+  depotSettings: 'depot_settings',
+  depotTrucks: 'depot_trucks',
+  depotDispatches: 'depot_dispatches',
+  depotAdjustments: 'depot_adjustments',
 };
 
 export interface CountsResult {

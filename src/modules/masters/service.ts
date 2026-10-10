@@ -1,10 +1,11 @@
 import { q, qOne, tx, Q } from '../../db/pool';
 import { errors, isDuplicateKey } from '../../lib/errors';
 import { isUuid, newId } from '../../lib/ids';
+import { depotUsage } from '../depot/service';
 
-export type MasterTable = 'parties' | 'locations' | 'grades' | 'companies' | 'sources' | 'scheme_folders';
+export type MasterTable = 'parties' | 'locations' | 'grades' | 'companies' | 'sources' | 'scheme_folders' | 'labours';
 
-const TABLES: MasterTable[] = ['parties', 'locations', 'grades', 'companies', 'sources', 'scheme_folders'];
+const TABLES: MasterTable[] = ['parties', 'locations', 'grades', 'companies', 'sources', 'scheme_folders', 'labours'];
 
 export function assertMasterTable(t: string): asserts t is MasterTable {
   if (!TABLES.includes(t as MasterTable)) throw errors.notFound('Unknown entity');
@@ -84,7 +85,9 @@ export async function updateRow(
 /** Soft delete (tombstone). Returns false when already absent/tombstoned. */
 export async function softDeleteRow(
   c: Q,
-  table: MasterTable | 'party_routes' | 'freight_entries' | 'stock_days' | 'purchases' | 'schemes' | 'claims',
+  table:
+    | MasterTable | 'party_routes' | 'freight_entries' | 'stock_days' | 'purchases' | 'schemes' | 'claims'
+    | 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments',
   firmId: string,
   id: string,
   userId: string,
@@ -116,6 +119,18 @@ export async function reorderRows(table: MasterTable, firmId: string, ids: strin
  * rev bump so the change propagates on the next pull.
  */
 export async function deleteWithCascade(c: Q, table: MasterTable, firmId: string, id: string, userId: string): Promise<void> {
+  // The depot diary is a register: a customer, company, grade or gang that
+  // disappears from under it leaves lines nobody can read. Refuse first,
+  // before anything is tombstoned, so a refusal changes nothing.
+  const depotKind = ({ parties: 'party', companies: 'company', grades: 'grade', labours: 'labour' } as const)[
+    table as 'parties' | 'companies' | 'grades' | 'labours'
+  ];
+  if (depotKind) {
+    const used = await depotUsage(c, firmId, depotKind, id);
+    if (used > 0) {
+      throw errors.businessRule(`Still used by ${used} depot diary entr${used === 1 ? 'y' : 'ies'}; delete those first`);
+    }
+  }
   const deleted = await softDeleteRow(c, table, firmId, id, userId);
   if (!deleted) return;
 

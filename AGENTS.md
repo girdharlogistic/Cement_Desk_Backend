@@ -291,6 +291,30 @@ second Google account would profit. A monthly referee stays `pending`; a later
 switch to yearly is a new Play token, verified by the app, and qualifies then.
 Two accounts on yearly is still possible — the console review is the check.
 
+### Depot diary (2026-10-10)
+
+`modules/depot`, migration `0004`. The dealer's paper dispatch register:
+`depot_trucks` (a company truck and how its bags split), `depot_dispatches`
+(bags out on a customer's vehicle — `source` `godown` or `truck`, the latter a
+direct delivery pointing at its truck), `depot_adjustments` (opening stock,
+burst bags, count corrections), `labours` (gangs — a MASTER_DEFS master) and
+`depot_settings` (three ₹/bag handling rates, one row per firm).
+
+**Sync-only**, no REST routes beyond the labour master. Grade quantities are
+JSON columns, not child tables — see the migration's header for why, and
+`json_each` in `depotUsage` for the one query that looks inside them.
+Godown stock is never stored; the app derives it.
+
+Two invariants worth knowing before touching masters:
+
+- `deleteWithCascade` now **refuses** (422) to delete a party, company, grade
+  or labour that a live diary row uses. Checked first, so a refusal writes
+  nothing. Party deletion used to always succeed — if a support request says
+  "can't delete a customer", this is why.
+- Backup import accepts `schemaVersion` 1–5 (it was 1–3, which made the app's
+  own "Upload backup" fail from the steel release, schema 4, onward). Export
+  still says 3 so older apps restore it.
+
 ---
 
 ## 4. Ads (app repo)

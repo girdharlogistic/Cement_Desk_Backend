@@ -475,6 +475,106 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(tomb.deletedAt).toBeTruthy();
   });
 
+  it('depot diary: push, conflict, truck cascade, usage guard, pull, backup', async () => {
+    const f = await api('POST', '/firms', { name: `Depot-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(950), mutations }, tok);
+    const [party, company, labour, truck, direct, out, opening] = [U(951), U(952), U(953), U(954), U(955), U(956), U(957)];
+
+    const masters = await push([
+      { op: 'upsert', entity: 'grades', id: gradeA, data: { name: 'PPC', order: 0 } },
+      { op: 'upsert', entity: 'parties', id: party, data: { name: 'Sharma Traders', order: 0 } },
+      { op: 'upsert', entity: 'companies', id: company, data: { name: 'JK Cement', order: 0 } },
+      { op: 'upsert', entity: 'labours', id: labour, data: { name: 'Raju gang', order: 0 } },
+      { op: 'upsert', entity: 'depotSettings', id: fid, data: { unloadRate: 3, directRate: 2, loadRate: 3.5 } },
+    ]);
+    expect(masters.body.rejected).toEqual([]);
+    expect(masters.body.applied.length).toBe(5);
+
+    const rows = await push([
+      { op: 'upsert', entity: 'depotTrucks', id: truck, data: {
+        date: DAY, companyId: company, truckNo: 'rj09 ga 4521', ref: 'INV-7',
+        received: { [gradeA]: 600 }, godown: { [gradeA]: 350 }, short: {}, labourId: labour, unloadRate: 3,
+      } },
+      { op: 'upsert', entity: 'depotDispatches', id: direct, data: {
+        date: DAY, companyId: company, source: 'truck', truckId: truck, partyId: party,
+        address: 'Shastri Nagar', vehicleNo: 'self', gradeBags: { [gradeA]: 250 }, labourId: labour, labourRate: 2,
+      } },
+      { op: 'upsert', entity: 'depotDispatches', id: out, data: {
+        date: DAY, companyId: company, source: 'godown', partyId: party, vehicleNo: 'RJ06 CB 1122',
+        gradeBags: { [gradeA]: 50 }, labourId: labour, labourRate: 3.5,
+      } },
+      { op: 'upsert', entity: 'depotAdjustments', id: opening, data: {
+        date: '2026-08-01', companyId: company, kind: 'opening', gradeBags: { [gradeA]: 1000 },
+      } },
+    ]);
+    expect(rows.body.rejected).toEqual([]);
+    expect(rows.body.applied.map((a: any) => a.rev)).toEqual([1, 1, 1, 1]);
+
+    // Shape is checked: no bags, a negative bag, a direct delivery with no
+    // truck, a "damage" that adds stock.
+    const bad = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: U(960), data: { date: DAY, companyId: company, partyId: party, gradeBags: {} } },
+      { op: 'upsert', entity: 'depotDispatches', id: U(961), data: { date: DAY, companyId: company, partyId: party, gradeBags: { [gradeA]: -5 } } },
+      { op: 'upsert', entity: 'depotDispatches', id: U(962), data: { date: DAY, companyId: company, partyId: party, source: 'truck', gradeBags: { [gradeA]: 5 } } },
+      { op: 'upsert', entity: 'depotAdjustments', id: U(963), data: { date: DAY, companyId: company, kind: 'damage', gradeBags: { [gradeA]: 5 } } },
+    ]);
+    expect(bad.body.applied).toEqual([]);
+    expect(bad.body.rejected.map((r: any) => r.code)).toEqual(['VALIDATION_FAILED', 'VALIDATION_FAILED', 'VALIDATION_FAILED', 'VALIDATION_FAILED']);
+
+    // A stale rev is a conflict carrying the server's row, like freight.
+    const stale = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, rev: 7, data: { date: DAY, companyId: company, partyId: party, gradeBags: { [gradeA]: 60 } } },
+    ]);
+    expect(stale.body.conflicts[0].server.gradeBags[gradeA]).toBe(50);
+    const fresh = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, rev: 1, data: { date: DAY, companyId: company, partyId: party, vehicleNo: 'RJ06 CB 1122', gradeBags: { [gradeA]: 60 }, labourId: labour, labourRate: 3.5 } },
+    ]);
+    expect(fresh.body.applied[0].rev).toBe(2);
+
+    // Masters the diary uses cannot be deleted out from under it.
+    for (const [kind, id] of [['parties', party], ['companies', company], ['grades', gradeA], ['labours', labour]] as const) {
+      const del = await api('DELETE', `/firms/${fid}/${kind}/${id}`, undefined, tok);
+      expect(del.status).toBe(422);
+    }
+
+    const pull = await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok);
+    const ch = pull.body.changes;
+    expect(ch.labours.map((l: any) => l.name)).toEqual(['Raju gang']);
+    expect(ch.depotSettings).toEqual([expect.objectContaining({ unloadRate: 3, directRate: 2, loadRate: 3.5 })]);
+    expect(ch.depotTrucks[0]).toEqual(expect.objectContaining({ truckNo: 'RJ09 GA 4521', received: { [gradeA]: 600 }, godown: { [gradeA]: 350 } }));
+    const byId = Object.fromEntries(ch.depotDispatches.map((d: any) => [d.id, d]));
+    expect(byId[direct]).toEqual(expect.objectContaining({ source: 'truck', truckId: truck, vehicleNo: 'SELF' }));
+    expect(byId[out]).toEqual(expect.objectContaining({ source: 'godown', truckId: null, gradeBags: { [gradeA]: 60 } }));
+    expect(ch.depotAdjustments[0].kind).toBe('opening');
+
+    const counts = await api('GET', `/firms/${fid}/sync/counts`, undefined, tok);
+    expect(counts.body.counts.depotDispatches).toBe(2);
+
+    // The backup carries the diary.
+    const exp = await api('GET', `/firms/${fid}/export/backup`, undefined, tok);
+    expect(exp.body.depotTrucks.length).toBe(1);
+    expect(exp.body.depotDispatches.length).toBe(2);
+    expect(exp.body.labours.length).toBe(1);
+
+    // Deleting the truck takes its direct delivery with it, not the godown one.
+    const delTruck = await push([{ op: 'delete', entity: 'depotTrucks', id: truck, rev: 1 }]);
+    expect(delTruck.body.applied.length).toBe(1);
+    const after = await api('GET', `/firms/${fid}/sync/pull?cursor=${encodeURIComponent(pull.body.nextCursor)}`, undefined, tok);
+    const gone = after.body.changes.depotDispatches.find((d: any) => d.id === direct);
+    expect(gone.deletedAt).toBeTruthy();
+    expect(after.body.changes.depotDispatches.find((d: any) => d.id === out)).toBeUndefined();
+
+    // Version 4 and 5 files are accepted now, and the diary comes back.
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=merge`, { ...exp.body, schemaVersion: 5 }, tok);
+    expect(restore.status).toBe(200);
+    expect(restore.body.imported.depotTrucks).toBe(1);
+    expect(restore.body.imported.depotDispatches).toBe(2);
+    const v4 = await api('POST', `/firms/${fid}/import/backup?mode=merge`, { ...exp.body, schemaVersion: 4 }, tok);
+    expect(v4.status).toBe(200);
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

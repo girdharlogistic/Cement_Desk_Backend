@@ -407,9 +407,9 @@ Branch on `error.code`, never on the message text.
 
 ## 6. Masters
 
-Six entities share one identical CRUD shape: **parties, locations, grades, companies,
-sources, schemeFolders**. Everything below applies to all six; only the fields and the
-response key differ.
+Seven entities share one identical CRUD shape: **parties, locations, grades, companies,
+sources, schemeFolders, labours**. Everything below applies to all seven; only the fields and
+the response key differ.
 
 | Method | Path | Returns | Min role |
 |---|---|---|---|
@@ -421,7 +421,7 @@ response key differ.
 
 **Response key is singular**: `parties` → `{ "party": {…} }`, `locations` → `{ "location": {…} }`,
 `grades` → `{ "grade": {…} }`, `companies` → `{ "company": {…} }`, `sources` → `{ "source": {…} }`,
-`schemeFolders` → `{ "schemeFolder": {…} }`.
+`schemeFolders` → `{ "schemeFolder": {…} }`, `labours` → `{ "labour": {…} }`.
 
 **POST returns 201 when it created a row and 200 when it updated an existing id.** Sending a
 create with an id that already exists is an idempotent upsert, and it will resurrect a
@@ -439,6 +439,7 @@ tombstoned record. Treat 200 and 201 the same way.
 | `companies` | `{ id?, name, order? }` | `order` |
 | `sources` | `{ id?, name, type?, order? }` | `type` (`plant`/`depot`, default `plant`) |
 | `schemeFolders` | `{ id?, name, order? }` | `order` |
+| `labours` | `{ id?, name, phone?, order? }` | `phone`, `order` — loading gangs for the depot diary (§10b) |
 
 `name` is 1–160 chars (1–80 for grades). `order` is 0–1,000,000. PATCH bodies are the same
 fields, all optional, minus `id`.
@@ -480,6 +481,10 @@ Deletes are soft (tombstones). Cascades the server performs for you:
   each affected scheme gets a `rev` bump so your next pull sees the move. A folder is filing,
   not ownership.
 - **Location**, **Source** → no cascade.
+- **Party, company, grade, labour** → **refused with 422** while any live depot diary row
+  (§10b) still uses it — as a customer, a company, a grade line, or the gang that lifted. A
+  register whose customer can vanish is not a register. Checked before anything else, so a
+  refused delete changes nothing.
 
 ---
 
@@ -899,6 +904,35 @@ never stored — don't send them.
 
 ---
 
+## 10b. Depot diary
+
+The dealer's paper dispatch register. **Sync-only**: there are no REST routes for these rows
+beyond the `labours` master (§6); write them through `POST /sync/push` and read them from the
+pull. The server stores and validates shape; godown stock, the truck tally and the labour bill
+are the client's arithmetic, never stored.
+
+All grade quantities are objects of `gradeId → bags`. Zero lines are dropped on the way in.
+
+| Entity | Shape (`data`) | Rules |
+|---|---|---|
+| `depotSettings` | `{ unloadRate, directRate, loadRate }` — ₹ per bag | One per firm. Push `id` = **the firm id** (like `baseline`). In a pull it is a **list of at most one**, not a bare object. Upsert only. |
+| `depotTrucks` | `{ date, companyId, truckNo, ref, received{}, godown{}, short{}, labourId?, unloadRate, note }` | `received` must hold at least one bag. `truckNo` is upper-cased. |
+| `depotDispatches` | `{ date, companyId, source, truckId?, partyId, address, vehicleNo, gradeBags{}, labourId?, labourRate, note }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. |
+| `depotAdjustments` | `{ date, companyId, kind, gradeBags{}, note }` | `kind` is `opening` (positive), `damage` (**negative** bags) or `correction` (either sign). |
+
+Rates are **frozen on each row** (`unloadRate`, `labourRate`), like freight rates: changing
+`depotSettings` re-prices nothing by itself. The app re-prices from a date the user picks by
+pushing the affected rows.
+
+Deleting a truck **also tombstones its direct deliveries** (`depotDispatches` with that
+`truckId`). The app sends those deletes itself; the server cascade is the backstop.
+
+Godown stock per company and grade, which the client derives:
+`opening + Σ truck.godown − Σ godown dispatches + Σ adjustments`. Direct deliveries never
+touch it.
+
+---
+
 ## 11. Sync protocol
 
 This is what makes the app work offline. Sync is **per firm** — a user with three firms syncs
@@ -926,7 +960,9 @@ remember your cursor. Omit `cursor` entirely for a **full sync from the beginnin
     "freightEntries": [],
     "baseline": null,
     "stockDays": [],
-    "purchases": [], "schemeFolders": [], "schemes": [], "claims": []
+    "purchases": [], "schemeFolders": [], "schemes": [], "claims": [],
+    "labours": [], "depotSettings": [], "depotTrucks": [], "depotDispatches": [],
+    "depotAdjustments": []
   }
 }
 ```
@@ -998,7 +1034,8 @@ are safe to retry.
 
 `parties`, `locations`, `grades`, `companies`, `sources`, `routes`, `baseline`, `stockDays`,
 `freightEntries`, `schemeFolders`, `schemes`, `purchases`, `purchasePayments`, `claims`,
-`claimCreditNotes`
+`claimCreditNotes`, `labours`, `depotSettings`, `depotTrucks`, `depotDispatches`,
+`depotAdjustments`
 
 They are applied **in that order** — `schemeFolders` before `schemes` for the same reason
 `companies` comes before `purchases`: a scheme filed under a folder the server has not seen
@@ -1027,7 +1064,9 @@ is the key mapping, and after the first successful push you can use the UUID dir
 
 | Entity | Policy | What it means for you |
 |---|---|---|
-| Masters (parties, locations, grades, companies, sources, schemeFolders, routes) | **Last-write-wins** | Your push always applies. Low stakes. |
+| Masters (parties, locations, grades, companies, sources, schemeFolders, labours, routes) | **Last-write-wins** | Your push always applies. Low stakes. |
+| `depotSettings` | **Last-write-wins** | Three rates; refusing a rate change because another phone saved first would only make someone type it twice. |
+| `depotTrucks`, `depotDispatches`, `depotAdjustments` | **Reject on `rev` mismatch** | Same as freight entries: a diary line is a record of what happened, and two phones disagreeing about it is for a person to settle. |
 | `freightEntries`, `purchases` | **Reject on `rev` mismatch** | You **must** send an accurate `rev`. Omitting it on an existing row is treated as a conflict. Show a merge prompt. |
 | `stockDays` cells | **Field-level merge** | Cells merge per `(party, grade)`. A stale `rev` does **not** reject — two people filling different parties on the same sheet both succeed. |
 | `baseline` | **Reject on mismatch** | Changing it re-rates every later day. |
@@ -1117,8 +1156,13 @@ never during a free trial, never on monthly. Each referral carries
 Export returns the same v3 JSON shape the on-device backup uses, with a
 `Content-Disposition: attachment` header. Only live records are exported.
 
-Import accepts `schemaVersion` **1, 2 and 3** and maps the legacy **integer** enums to strings —
-this is the migration path for existing users' on-device backups.
+Import accepts `schemaVersion` **1 to 5** and maps the legacy **integer** enums to strings —
+this is the migration path for existing users' on-device backups. Version 4 added the steel
+estimator, which does not sync and is ignored here; version 5 added the depot diary
+(`labours`, `depotSettings`, `depotTrucks`, `depotDispatches`, `depotAdjustments`, in the §10b
+shapes). Diary rows that point at a customer, company or grade the file and the firm do not
+have are **skipped with a warning**, not fatal. The export carries the same diary keys but
+still says `schemaVersion: 3`, so older app builds can restore it.
 
 - `?mode=merge` (default) upserts by id.
 - `?mode=replace` wipes the firm's existing data first, and **requires `"confirmReplace": true`

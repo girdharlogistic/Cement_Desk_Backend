@@ -158,6 +158,30 @@ export const MASTER_DEFS: MasterDef[] = [
     }),
     orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',
   },
+  // Loading gangs for the depot diary. A name, a phone and a place in the
+  // list — a master in every respect, so it takes the master machinery. What
+  // they are paid lives on the diary rows (frozen) and in depot_settings, not
+  // here: a rate change must not re-price work already done.
+  {
+    apiName: 'labours',
+    table: 'labours',
+    createSchema: z.object({ id: idField, name: name160, phone, order: orderField }),
+    patchSchema: z.object({ name: name160.optional(), phone, order: orderField }),
+    toCols: (b) => ({
+      ...(b.name !== undefined ? { name: b.name } : {}),
+      ...(b.phone !== undefined ? { phone: b.phone ?? null } : {}),
+      ...(b.order !== undefined ? { sort_order: b.order } : {}),
+    }),
+    mapRow: (r) => ({
+      id: r.id,
+      firmId: r.firm_id,
+      name: r.name,
+      phone: r.phone ?? null,
+      order: Number(r.sort_order),
+      ...syncMeta(r),
+    }),
+    orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',
+  },
 ];
 
 export function mapMasterRow(table: MasterTable | 'party_routes', row: any): any {
@@ -305,7 +329,9 @@ function sing(apiName: string): string {
           ? 'grade'
           : apiName === 'schemeFolders'
             ? 'schemeFolder'
-            : 'location';
+            : apiName === 'labours'
+              ? 'labour'
+              : 'location';
 }
 
 /** Route list helper for sync pull (shared with §9). */

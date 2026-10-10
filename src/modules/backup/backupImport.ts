@@ -5,6 +5,7 @@ import { parseBusinessDate } from '../../lib/dates';
 import { num } from '../../lib/num';
 import { ensureSerialAtLeast } from '../freight/service';
 import { enumFromLegacy } from './enumMaps';
+import { planDepot, writeDepotLabours, writeDepotRecords, DEPOT_REPLACE_TABLES } from '../depot/backup';
 
 export interface ImportResult {
   imported: Record<string, number>;
@@ -39,15 +40,18 @@ export async function importBackup(
 ): Promise<ImportResult> {
   if (!body || typeof body !== 'object') throw errors.validation('Backup body must be a JSON object');
   const version = Number(body.schemaVersion ?? 0);
-  if (![1, 2, 3].includes(version)) {
+  // 4 added the steel estimator, which does not sync and is ignored here; 5
+  // added the depot diary. Refusing 4 used to make the app's own "Upload
+  // backup" fail outright from the release that introduced steel onwards.
+  if (![1, 2, 3, 4, 5].includes(version)) {
     throw errors.validation('Unsupported schemaVersion', [
-      { field: 'schemaVersion', code: 'UNSUPPORTED', message: 'schemaVersion must be 1, 2 or 3' },
+      { field: 'schemaVersion', code: 'UNSUPPORTED', message: 'schemaVersion must be between 1 and 5' },
     ]);
   }
 
   // In merge mode, masters already in the DB are valid references too.
   const dbSets =
-    mode === 'merge' ? await existingMasterIds(firmId) : { parties: new Set<string>(), locations: new Set<string>(), grades: new Set<string>(), companies: new Set<string>(), sources: new Set<string>() };
+    mode === 'merge' ? await existingMasterIds(firmId) : { parties: new Set<string>(), locations: new Set<string>(), grades: new Set<string>(), companies: new Set<string>(), sources: new Set<string>(), labours: new Set<string>() };
 
   const plan = buildPlan(firmId, body, dbSets);
   if (plan.errors.length) {
@@ -66,6 +70,7 @@ export async function importBackup(
       for (const t of [
         'parties', 'locations', 'grades', 'party_routes', 'freight_entries', 'opening_baselines',
         'stock_days', 'companies', 'sources', 'purchases', 'scheme_folders', 'schemes', 'claims',
+        ...DEPOT_REPLACE_TABLES,
       ]) {
         await c.query(`UPDATE ${t} SET deleted_at = UTC_TIMESTAMP(3), updated_by = ?, rev = rev + 1 WHERE firm_id = ? AND deleted_at IS NULL`, [userId, firmId]);
       }
@@ -109,6 +114,7 @@ export async function importBackup(
     upsertSync(c, 'companies', ['firm_id', 'id', 'name', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.order, userId]));
   await write('sources', p.sources, (c, r: any) =>
     upsertSync(c, 'sources', ['firm_id', 'id', 'name', 'type', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.type, r.order, userId]));
+  await writeDepotLabours(p.depot, firmId, userId, write, upsertSync);
 
   await write('routes', p.routes, async (c, r: any) => {
     const [rows] = await c.query('SELECT id FROM party_routes WHERE firm_id = ? AND party_id = ? AND location_id = ?', [firmId, r.partyId, r.locationId]);
@@ -251,6 +257,8 @@ export async function importBackup(
     }
   });
 
+  if (await writeDepotRecords(p.depot, firmId, userId, write, upsertSync, (fn) => tx(fn))) counts.depotSettings = 1;
+
   // §5.1: keep the counter ahead of restored data (ensureSerialAtLeast).
   const maxSerial = p.freightEntries.reduce((a: number, r: any) => Math.max(a, Number(r.serial) || 0), 0);
   await tx(async (c) => {
@@ -263,18 +271,21 @@ export async function importBackup(
 // ------------------------------------------------------------------ dry-run parse
 
 export async function existingMasterIds(firmId: string): Promise<{
-  parties: Set<string>; locations: Set<string>; grades: Set<string>; companies: Set<string>; sources: Set<string>;
+  parties: Set<string>; locations: Set<string>; grades: Set<string>; companies: Set<string>; sources: Set<string>; labours: Set<string>;
 }> {
   const { q } = await import('../../db/pool');
   const get = async (t: string) =>
     new Set<string>((await q<{ id: string }>(`SELECT id FROM ${t} WHERE firm_id = ? AND deleted_at IS NULL`, [firmId])).map((r) => r.id));
-  const [parties, locations, grades, companies, sources] = await Promise.all(
-    ['parties', 'locations', 'grades', 'companies', 'sources'].map(get),
+  const [parties, locations, grades, companies, sources, labours] = await Promise.all(
+    ['parties', 'locations', 'grades', 'companies', 'sources', 'labours'].map(get),
   );
-  return { parties, locations, grades, companies, sources };
+  return { parties, locations, grades, companies, sources, labours };
 }
 
-type RefSets = { parties: Set<string>; locations: Set<string>; grades: Set<string>; companies: Set<string>; sources: Set<string> };
+type RefSets = {
+  parties: Set<string>; locations: Set<string>; grades: Set<string>; companies: Set<string>; sources: Set<string>;
+  labours?: Set<string>;
+};
 
 function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed?: any } {
   const errorsL: ErrorDetail[] = [];
@@ -541,9 +552,15 @@ function buildPlan(firmId: string, body: any, dbSets?: RefSets): Plan & { parsed
   });
 
   if (errorsL.length) return { errors: errorsL, warnings };
+  const depot = planDepot(body, {
+    parties: partyIds,
+    companies: mergeSet(idSet(companies), dbSets?.companies),
+    grades: gradeIds,
+    labours: dbSets?.labours ?? new Set<string>(),
+  }, warnings);
   return {
     errors: [], warnings,
-    parsed: { parties, locations, grades, companies, sources, routes, baseline, stockDays, freightEntries, schemeFolders, schemes, purchases, claims },
+    parsed: { parties, locations, grades, companies, sources, routes, baseline, stockDays, freightEntries, schemeFolders, schemes, purchases, claims, depot },
   };
 }
 

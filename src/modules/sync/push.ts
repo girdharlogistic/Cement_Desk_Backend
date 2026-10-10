@@ -10,6 +10,7 @@ import { allocateSerial, mapFreightEntry, compactSerialsAfterDelete } from '../f
 import { mapPurchase } from '../landing/purchases';
 import { normalizeGradeIds, legacyGradeId } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
+import { applyDepot } from '../depot/service';
 import { claimAutoStatus, sortSlabs } from '../../lib/validators';
 
 export interface Mutation {
@@ -43,6 +44,10 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
   const GROUP_ORDER = [
     'grades', 'parties', 'locations', 'companies', 'sources', 'routes', 'baseline',
     'stockDays', 'freightEntries', 'schemeFolders', 'schemes', 'purchases', 'purchasePayments', 'claims', 'claimCreditNotes',
+    // Depot diary. Appended rather than interleaved so the order above stays
+    // what every shipped client already has; labours precede the rows that
+    // name them, and trucks precede the direct deliveries that point back.
+    'labours', 'depotSettings', 'depotTrucks', 'depotDispatches', 'depotAdjustments',
   ];
   const byEntity = new Map<string, Mutation[]>();
   for (const m of mutations) {
@@ -79,7 +84,7 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
 async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   try {
     switch (m.entity) {
-      case 'parties': case 'locations': case 'grades': case 'companies': case 'sources': case 'schemeFolders':
+      case 'parties': case 'locations': case 'grades': case 'companies': case 'sources': case 'schemeFolders': case 'labours':
         return m.op === 'upsert' ? await masterUpsert(ctx, m) : await masterDelete(ctx, m);
       case 'routes': return m.op === 'upsert' ? await routeUpsert(ctx, m) : await routeDelete(ctx, m);
       case 'freightEntries': return m.op === 'upsert' ? await freightUpsert(ctx, m) : await freightDelete(ctx, m);
@@ -90,6 +95,8 @@ async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       case 'schemes': return m.op === 'upsert' ? await schemeUpsert(ctx, m) : await schemeDelete(ctx, m);
       case 'claims': return m.op === 'upsert' ? await claimUpsert(ctx, m) : await claimDelete(ctx, m);
       case 'claimCreditNotes': return m.op === 'upsert' ? await creditNoteUpsert(ctx, m) : await creditNoteDelete(ctx, m);
+      case 'depotSettings': case 'depotTrucks': case 'depotDispatches': case 'depotAdjustments':
+        return await applyDepot(ctx, m);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);
     }
