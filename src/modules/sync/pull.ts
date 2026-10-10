@@ -8,7 +8,9 @@ import { mapStockDay } from '../stock/service';
 import { mapPurchase, paymentsFor } from '../landing/purchases';
 import { mapScheme } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
-import { mapDepotSettings, mapDepotTruck, mapDepotDispatch, mapDepotAdjustment } from '../depot/service';
+import {
+  mapDepotSettings, mapDepotTruck, mapDepotDispatch, mapDepotAdjustment, mapMaterialItem, mapMaterialMove,
+} from '../depot/service';
 import { num } from '../../lib/num';
 import { firmWatermark } from '../../lib/caches';
 
@@ -23,6 +25,7 @@ function noChanges(): Record<string, unknown[] | null> {
     freightEntries: [], baseline: null, stockDays: [], purchases: [], schemeFolders: [],
     schemes: [], claims: [],
     labours: [], depotSettings: [], depotTrucks: [], depotDispatches: [], depotAdjustments: [],
+    materialItems: [], materialMoves: [],
   };
 }
 
@@ -202,6 +205,8 @@ export async function pull(
   changes.depotTrucks = (await page('depot_trucks')).map(mapDepotTruck);
   changes.depotDispatches = (await page('depot_dispatches')).map(mapDepotDispatch);
   changes.depotAdjustments = (await page('depot_adjustments')).map(mapDepotAdjustment);
+  changes.materialItems = (await page('material_items')).map(mapMaterialItem);
+  changes.materialMoves = (await page('material_moves')).map(mapMaterialMove);
 
   // Cap at the earliest truncation point (see `page`). The cap must still make
   // forward progress: if a single table has more than `limit` rows sharing one

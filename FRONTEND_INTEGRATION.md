@@ -931,6 +931,18 @@ Godown stock per company and grade, which the client derives:
 `opening + Σ truck.godown − Σ godown dispatches + Σ adjustments`. Direct deliveries never
 touch it.
 
+### Steel and material
+
+Two more sync entities, independent of any cement company:
+
+| Entity | Shape (`data`) | Rules |
+|---|---|---|
+| `materialItems` | `{ kind, name, unit, category, sizes[], loadRate, unloadRate, order }` | `kind` is `"steel"` (a brand) or `"material"`. Steel `unit` is `"pcs"` or `"kg"`; `sizes` is `[{ sizeMm, rodsPerBundle, kgPerRod }]` and is cleared for non-steel. `category` is `steel` for a brand, else `bindingWire`/`coverBlock`/`chemical`/`other`. Rates are ₹ per bundle (steel) or per unit. **Last-write-wins.** Delete is refused (`BUSINESS_RULE_VIOLATION`) while any live move uses the item. |
+| `materialMoves` | `{ date, kind, partyId?, supplier, address, vehicleNo, labourId?, lines[], note }` | `kind` is `receive`, `dispatch` (needs `partyId`), `opening` or `adjust` (the only kind whose `qty` may be negative). Each line is `{ itemId, sizeMm, qty, bundles, rate }` — `sizeMm` is 0 for an item without sizes; `bundles` is the count the labour rate applies to (bundles for steel, the quantity otherwise), frozen like `rate`. **Reject on `rev` mismatch.** |
+
+Steel stock is kept per `(itemId, sizeMm)` in the item's own unit, derived the same way as
+godown cement. Parties and labours used by a move cannot be deleted either.
+
 ---
 
 ## 11. Sync protocol
@@ -962,7 +974,7 @@ remember your cursor. Omit `cursor` entirely for a **full sync from the beginnin
     "stockDays": [],
     "purchases": [], "schemeFolders": [], "schemes": [], "claims": [],
     "labours": [], "depotSettings": [], "depotTrucks": [], "depotDispatches": [],
-    "depotAdjustments": []
+    "depotAdjustments": [], "materialItems": [], "materialMoves": []
   }
 }
 ```
@@ -1035,7 +1047,7 @@ are safe to retry.
 `parties`, `locations`, `grades`, `companies`, `sources`, `routes`, `baseline`, `stockDays`,
 `freightEntries`, `schemeFolders`, `schemes`, `purchases`, `purchasePayments`, `claims`,
 `claimCreditNotes`, `labours`, `depotSettings`, `depotTrucks`, `depotDispatches`,
-`depotAdjustments`
+`depotAdjustments`, `materialItems`, `materialMoves`
 
 They are applied **in that order** — `schemeFolders` before `schemes` for the same reason
 `companies` comes before `purchases`: a scheme filed under a folder the server has not seen
@@ -1066,7 +1078,8 @@ is the key mapping, and after the first successful push you can use the UUID dir
 |---|---|---|
 | Masters (parties, locations, grades, companies, sources, schemeFolders, labours, routes) | **Last-write-wins** | Your push always applies. Low stakes. |
 | `depotSettings` | **Last-write-wins** | Three rates; refusing a rate change because another phone saved first would only make someone type it twice. |
-| `depotTrucks`, `depotDispatches`, `depotAdjustments` | **Reject on `rev` mismatch** | Same as freight entries: a diary line is a record of what happened, and two phones disagreeing about it is for a person to settle. |
+| `materialItems` | **Last-write-wins** | A master. |
+| `depotTrucks`, `depotDispatches`, `depotAdjustments`, `materialMoves` | **Reject on `rev` mismatch** | Same as freight entries: a diary line is a record of what happened, and two phones disagreeing about it is for a person to settle. |
 | `freightEntries`, `purchases` | **Reject on `rev` mismatch** | You **must** send an accurate `rev`. Omitting it on an existing row is treated as a conflict. Show a merge prompt. |
 | `stockDays` cells | **Field-level merge** | Cells merge per `(party, grade)`. A stale `rev` does **not** reject — two people filling different parties on the same sheet both succeed. |
 | `baseline` | **Reject on mismatch** | Changing it re-rates every later day. |
@@ -1159,8 +1172,8 @@ Export returns the same v3 JSON shape the on-device backup uses, with a
 Import accepts `schemaVersion` **1 to 5** and maps the legacy **integer** enums to strings —
 this is the migration path for existing users' on-device backups. Version 4 added the steel
 estimator, which does not sync and is ignored here; version 5 added the depot diary
-(`labours`, `depotSettings`, `depotTrucks`, `depotDispatches`, `depotAdjustments`, in the §10b
-shapes). Diary rows that point at a customer, company or grade the file and the firm do not
+(`labours`, `depotSettings`, `depotTrucks`, `depotDispatches`, `depotAdjustments`,
+`materialItems`, `materialMoves`, in the §10b shapes). Diary rows that point at a customer, company or grade the file and the firm do not
 have are **skipped with a warning**, not fatal. The export carries the same diary keys but
 still says `schemaVersion: 3`, so older app builds can restore it.
 

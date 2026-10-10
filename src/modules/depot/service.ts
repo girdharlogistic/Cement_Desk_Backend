@@ -151,6 +151,51 @@ export function mapDepotAdjustment(r: any): any {
   };
 }
 
+export function mapMaterialItem(r: any): any {
+  let sizes: unknown = [];
+  try {
+    sizes = JSON.parse(String(r.sizes ?? '[]'));
+  } catch {
+    sizes = [];
+  }
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    kind: r.kind,
+    name: r.name,
+    unit: r.unit,
+    category: r.category,
+    sizes: Array.isArray(sizes) ? sizes : [],
+    loadRate: num(r.load_rate),
+    unloadRate: num(r.unload_rate),
+    order: Number(r.sort_order),
+    ...syncMeta(r),
+  };
+}
+
+export function mapMaterialMove(r: any): any {
+  let lines: unknown = [];
+  try {
+    lines = JSON.parse(String(r.lines ?? '[]'));
+  } catch {
+    lines = [];
+  }
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    date: r.date,
+    kind: r.kind,
+    partyId: r.party_id ?? null,
+    supplier: r.supplier ?? '',
+    address: r.address ?? '',
+    vehicleNo: r.vehicle_no ?? '',
+    labourId: r.labour_id ?? null,
+    lines: Array.isArray(lines) ? lines : [],
+    note: r.note ?? '',
+    ...syncMeta(r),
+  };
+}
+
 // ---------------------------------------------------------------- push
 
 interface Ctx {
@@ -174,6 +219,10 @@ export async function applyDepot(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
         return m.op === 'upsert' ? await recordUpsert(ctx, m, DISPATCHES) : await recordDelete(ctx, m, DISPATCHES);
       case 'depotAdjustments':
         return m.op === 'upsert' ? await recordUpsert(ctx, m, ADJUSTMENTS) : await recordDelete(ctx, m, ADJUSTMENTS);
+      case 'materialItems':
+        return m.op === 'upsert' ? await itemUpsert(ctx, m) : await itemDelete(ctx, m);
+      case 'materialMoves':
+        return m.op === 'upsert' ? await recordUpsert(ctx, m, MOVES) : await recordDelete(ctx, m, MOVES);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);
     }
@@ -211,7 +260,7 @@ async function settingsUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
  * remembered for the other two.
  */
 interface RecordDef {
-  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments';
+  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves';
   /** Validated wire data → column values, in a fixed column order. */
   columns(d: any): Record<string, unknown>;
   map(row: any): any;
@@ -298,6 +347,98 @@ const ADJUSTMENTS: RecordDef = {
   map: mapDepotAdjustment,
 };
 
+const MATERIAL_UNITS = 12;
+
+/**
+ * Steel and material moves. Every line names an item and, for steel, a bar
+ * size; `qty` is in the item's unit; `bundles` and `rate` are what the app
+ * counted and paid at save time and are stored as sent, never recomputed —
+ * a brand's bundle size changing next month must not move last month's bill.
+ */
+const MOVES: RecordDef = {
+  table: 'material_moves',
+  columns(d) {
+    const kind = (['receive', 'dispatch', 'opening', 'adjust'] as const).includes(d.kind) ? d.kind : bad("kind must be 'receive', 'dispatch', 'opening' or 'adjust'");
+    if (!Array.isArray(d.lines) || d.lines.length === 0) bad('A move needs at least one line');
+    if (d.lines.length > 500) bad('Too many lines on one move');
+    const lines = (d.lines as any[]).map((l, i) => {
+      if (!l || typeof l !== 'object') bad(`lines[${i}] must be an object`);
+      if (!isUuid(l.itemId)) bad(`lines[${i}].itemId must be a UUID`);
+      const sizeMm = l.sizeMm === undefined || l.sizeMm === null ? 0 : l.sizeMm;
+      if (!Number.isInteger(sizeMm) || sizeMm < 0 || sizeMm > 100) bad(`lines[${i}].sizeMm must be a whole number of mm`);
+      const qty = l.qty;
+      if (typeof qty !== 'number' || !Number.isFinite(qty) || Math.abs(qty) > MAX_BAGS) bad(`lines[${i}].qty must be a number`);
+      if (kind !== 'adjust' && qty < 0) bad(`lines[${i}].qty cannot be negative`);
+      const bundles = l.bundles === undefined || l.bundles === null ? 0 : l.bundles;
+      if (typeof bundles !== 'number' || !Number.isFinite(bundles) || bundles < 0 || bundles > MAX_BAGS) bad(`lines[${i}].bundles must be a non-negative number`);
+      return { itemId: l.itemId, sizeMm, qty, bundles, rate: readRate(l.rate, `lines[${i}].rate`) };
+    });
+    if (lines.every((l) => Math.abs(l.qty) < 1e-9)) bad('A move needs a quantity on at least one line');
+    const partyId = readOptionalId(d.partyId, 'partyId');
+    if (kind === 'dispatch' && !partyId) bad('A dispatch needs the customer');
+    return {
+      date: readDate(d.date),
+      kind,
+      party_id: partyId,
+      supplier: readText(d.supplier, 160),
+      address: readText(d.address, 300),
+      vehicle_no: readText(d.vehicleNo, 40).toUpperCase(),
+      labour_id: readOptionalId(d.labourId, 'labourId'),
+      lines: JSON.stringify(lines.filter((l) => Math.abs(l.qty) >= 1e-9)),
+      note: readText(d.note, 500),
+    };
+  },
+  map: mapMaterialMove,
+};
+
+/**
+ * Items are masters: last write wins. The size specs are checked for shape
+ * because the app does arithmetic with them — a zero rods-per-bundle would
+ * divide the labour bill by nothing.
+ */
+async function itemUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
+  if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
+  const d = m.data ?? {};
+  const name = readText(d.name, 160);
+  if (!name) bad('name is required');
+  const kind = d.kind === 'steel' ? 'steel' : 'material';
+  const unit = readText(d.unit, MATERIAL_UNITS) || 'pcs';
+  if (kind === 'steel' && unit !== 'pcs' && unit !== 'kg') bad("steel is counted in 'pcs' or 'kg'");
+  const categories = ['bindingWire', 'coverBlock', 'chemical', 'other'];
+  const category = kind === 'steel' ? 'steel' : categories.includes(d.category) ? d.category : 'other';
+  const sizes = kind !== 'steel' ? [] : (Array.isArray(d.sizes) ? d.sizes : []).map((z: any, i: number) => {
+    if (!Number.isInteger(z?.sizeMm) || z.sizeMm <= 0 || z.sizeMm > 100) bad(`sizes[${i}].sizeMm must be a whole number of mm`);
+    const rods = z.rodsPerBundle;
+    if (typeof rods !== 'number' || !Number.isFinite(rods) || rods < 0 || rods > 10_000) bad(`sizes[${i}].rodsPerBundle is out of range`);
+    const kg = z.kgPerRod;
+    if (typeof kg !== 'number' || !Number.isFinite(kg) || kg < 0 || kg > 1000) bad(`sizes[${i}].kgPerRod is out of range`);
+    return { sizeMm: z.sizeMm, rodsPerBundle: rods, kgPerRod: kg };
+  });
+  const order = Number.isInteger(d.order) && d.order >= 0 && d.order <= 1_000_000 ? d.order : 0;
+  await ctx.c.query(
+    `INSERT INTO material_items (firm_id, id, kind, name, unit, category, sizes, load_rate, unload_rate, sort_order, updated_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (firm_id, id) DO UPDATE SET
+       kind = excluded.kind, name = excluded.name, unit = excluded.unit, category = excluded.category,
+       sizes = excluded.sizes, load_rate = excluded.load_rate, unload_rate = excluded.unload_rate,
+       sort_order = excluded.sort_order, deleted_at = NULL, rev = rev + 1, updated_by = excluded.updated_by`,
+    [ctx.firmId, m.id, kind, name, unit, category, JSON.stringify(sizes), readRate(d.loadRate, 'loadRate'),
+     readRate(d.unloadRate, 'unloadRate'), order, ctx.userId],
+  );
+  const [rows] = await ctx.c.query('SELECT rev FROM material_items WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
+  return applied(m, Number((rows as any[])[0].rev));
+}
+
+async function itemDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
+  if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
+  const used = await depotUsage(ctx.c, ctx.firmId, 'materialItem', m.id);
+  if (used > 0) {
+    return reject(m, 'BUSINESS_RULE_VIOLATION', `Still used by ${used} steel / material entr${used === 1 ? 'y' : 'ies'}; delete those first`);
+  }
+  await softDeleteRow(ctx.c, 'material_items', ctx.firmId, m.id, ctx.userId);
+  return applied(m, (m.rev ?? 0) + 1);
+}
+
 /**
  * Reject on rev mismatch, like freight entries: a diary line is a record of
  * what happened, and two phones disagreeing about it is for a person to
@@ -347,7 +488,7 @@ async function recordDelete(ctx: Ctx, m: Mutation, def: RecordDef): Promise<Push
 export async function depotUsage(
   c: Q,
   firmId: string,
-  kind: 'party' | 'company' | 'grade' | 'labour',
+  kind: 'party' | 'company' | 'grade' | 'labour' | 'materialItem',
   id: string,
 ): Promise<number> {
   const live = 'firm_id = ? AND deleted_at IS NULL';
@@ -355,7 +496,13 @@ export async function depotUsage(
   let params: unknown[];
   switch (kind) {
     case 'party':
-      sql = `SELECT COUNT(*) AS n FROM depot_dispatches WHERE ${live} AND party_id = ?`;
+      sql = `SELECT (SELECT COUNT(*) FROM depot_dispatches WHERE ${live} AND party_id = ?)
+                  + (SELECT COUNT(*) FROM material_moves WHERE ${live} AND party_id = ?) AS n`;
+      params = [firmId, id, firmId, id];
+      break;
+    case 'materialItem':
+      sql = `SELECT COUNT(*) AS n FROM material_moves t WHERE t.firm_id = ? AND t.deleted_at IS NULL
+               AND EXISTS (SELECT 1 FROM json_each(t.lines) j WHERE json_extract(j.value, '$.itemId') = ?)`;
       params = [firmId, id];
       break;
     case 'company':
@@ -366,8 +513,9 @@ export async function depotUsage(
       break;
     case 'labour':
       sql = `SELECT (SELECT COUNT(*) FROM depot_trucks WHERE ${live} AND labour_id = ?)
-                  + (SELECT COUNT(*) FROM depot_dispatches WHERE ${live} AND labour_id = ?) AS n`;
-      params = [firmId, id, firmId, id];
+                  + (SELECT COUNT(*) FROM depot_dispatches WHERE ${live} AND labour_id = ?)
+                  + (SELECT COUNT(*) FROM material_moves WHERE ${live} AND labour_id = ?) AS n`;
+      params = [firmId, id, firmId, id, firmId, id];
       break;
     case 'grade': {
       const inMap = (table: string, col: string) =>

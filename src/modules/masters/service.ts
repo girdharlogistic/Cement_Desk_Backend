@@ -87,7 +87,7 @@ export async function softDeleteRow(
   c: Q,
   table:
     | MasterTable | 'party_routes' | 'freight_entries' | 'stock_days' | 'purchases' | 'schemes' | 'claims'
-    | 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments',
+    | 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_items' | 'material_moves',
   firmId: string,
   id: string,
   userId: string,

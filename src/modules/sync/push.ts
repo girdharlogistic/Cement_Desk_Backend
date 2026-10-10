@@ -48,6 +48,8 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
     // what every shipped client already has; labours precede the rows that
     // name them, and trucks precede the direct deliveries that point back.
     'labours', 'depotSettings', 'depotTrucks', 'depotDispatches', 'depotAdjustments',
+    // Steel and material: items before the moves that name them.
+    'materialItems', 'materialMoves',
   ];
   const byEntity = new Map<string, Mutation[]>();
   for (const m of mutations) {
@@ -96,6 +98,7 @@ async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       case 'claims': return m.op === 'upsert' ? await claimUpsert(ctx, m) : await claimDelete(ctx, m);
       case 'claimCreditNotes': return m.op === 'upsert' ? await creditNoteUpsert(ctx, m) : await creditNoteDelete(ctx, m);
       case 'depotSettings': case 'depotTrucks': case 'depotDispatches': case 'depotAdjustments':
+      case 'materialItems': case 'materialMoves':
         return await applyDepot(ctx, m);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);

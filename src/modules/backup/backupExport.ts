@@ -43,6 +43,8 @@ export async function exportBackup(firmId: string): Promise<any> {
   const depotTrucks = await grab<any>('SELECT * FROM depot_trucks WHERE firm_id = ? ORDER BY date', [firmId]);
   const depotDispatches = await grab<any>('SELECT * FROM depot_dispatches WHERE firm_id = ? ORDER BY date', [firmId]);
   const depotAdjustments = await grab<any>('SELECT * FROM depot_adjustments WHERE firm_id = ? ORDER BY date', [firmId]);
+  const materialItems = await grab<any>('SELECT * FROM material_items WHERE firm_id = ? ORDER BY sort_order', [firmId]);
+  const materialMoves = await grab<any>('SELECT * FROM material_moves WHERE firm_id = ? ORDER BY date', [firmId]);
 
   const d = (r: any) => (r.deleted_at ? true : false);
   const live = (rows: any[]) => rows.filter((r) => !d(r));
@@ -138,6 +140,6 @@ export async function exportBackup(firmId: string): Promise<any> {
       sentOn: r.sent_on,
       creditNotes: notes.filter((n) => n.claim_id === r.id).map((n) => ({ id: n.id, date: n.date, number: n.number, amount: num(n.amount) })),
     })),
-    ...exportDepot(firmId, labours, depotSettings, depotTrucks, depotDispatches, depotAdjustments),
+    ...exportDepot(firmId, labours, depotSettings, depotTrucks, depotDispatches, depotAdjustments, materialItems, materialMoves),
   };
 }

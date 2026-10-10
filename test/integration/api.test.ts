@@ -575,6 +575,82 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(v4.status).toBe(200);
   });
 
+  it('steel and material register: items, moves, guards, pull, backup', async () => {
+    const f = await api('POST', '/firms', { name: `Steel-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(970), mutations }, tok);
+    const [party, labour, brand, wire, move, inbound] = [U(971), U(972), U(973), U(974), U(975), U(976)];
+
+    const items = await push([
+      { op: 'upsert', entity: 'parties', id: party, data: { name: 'Gupta Building', order: 0 } },
+      { op: 'upsert', entity: 'labours', id: labour, data: { name: 'Raju gang', order: 0 } },
+      { op: 'upsert', entity: 'materialItems', id: brand, data: {
+        kind: 'steel', name: 'Kamdhenu TMT', unit: 'pcs', loadRate: 4, unloadRate: 3,
+        sizes: [{ sizeMm: 8, rodsPerBundle: 10, kgPerRod: 4.74 }, { sizeMm: 12, rodsPerBundle: 5, kgPerRod: 10.66 }],
+      } },
+      { op: 'upsert', entity: 'materialItems', id: wire, data: { kind: 'material', name: 'Binding wire', unit: 'kg', category: 'bindingWire' } },
+    ]);
+    expect(items.body.rejected).toEqual([]);
+
+    const bad = await push([
+      { op: 'upsert', entity: 'materialItems', id: U(977), data: { kind: 'steel', name: 'X', unit: 'bags' } },
+      { op: 'upsert', entity: 'materialMoves', id: U(978), data: { date: DAY, kind: 'dispatch', lines: [{ itemId: wire, qty: 5 }] } },
+      { op: 'upsert', entity: 'materialMoves', id: U(979), data: { date: DAY, kind: 'receive', lines: [] } },
+    ]);
+    expect(bad.body.rejected.map((r: any) => r.code)).toEqual(['VALIDATION_FAILED', 'VALIDATION_FAILED', 'VALIDATION_FAILED']);
+
+    const moves = await push([
+      { op: 'upsert', entity: 'materialMoves', id: inbound, data: {
+        date: '2026-08-01', kind: 'receive', supplier: 'Kamdhenu dealer', vehicleNo: 'rj14 ga 1',
+        lines: [{ itemId: brand, sizeMm: 8, qty: 200, bundles: 20, rate: 3 }, { itemId: wire, qty: 100, rate: 0 }],
+        labourId: labour,
+      } },
+      { op: 'upsert', entity: 'materialMoves', id: move, data: {
+        date: DAY, kind: 'dispatch', partyId: party, address: 'Pur road site', vehicleNo: 'self', labourId: labour,
+        lines: [{ itemId: brand, sizeMm: 8, qty: 40, bundles: 4, rate: 4 }, { itemId: wire, qty: 25 }],
+      } },
+    ]);
+    expect(moves.body.rejected).toEqual([]);
+
+    const stale = await push([{ op: 'upsert', entity: 'materialMoves', id: move, rev: 9, data: {
+      date: DAY, kind: 'dispatch', partyId: party, lines: [{ itemId: wire, qty: 1 }],
+    } }]);
+    expect(stale.body.conflicts[0].server.lines.length).toBe(2);
+
+    // An item, a customer or a gang in use cannot be deleted.
+    const delItem = await push([{ op: 'delete', entity: 'materialItems', id: brand }]);
+    expect(delItem.body.rejected[0].code).toBe('BUSINESS_RULE_VIOLATION');
+    expect((await api('DELETE', `/firms/${fid}/parties/${party}`, undefined, tok)).status).toBe(422);
+    expect((await api('DELETE', `/firms/${fid}/labours/${labour}`, undefined, tok)).status).toBe(422);
+
+    const pull = await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok);
+    const ch = pull.body.changes;
+    const steel = ch.materialItems.find((x: any) => x.id === brand);
+    expect(steel.sizes).toEqual([{ sizeMm: 8, rodsPerBundle: 10, kgPerRod: 4.74 }, { sizeMm: 12, rodsPerBundle: 5, kgPerRod: 10.66 }]);
+    expect(steel.category).toBe('steel');
+    const out = ch.materialMoves.find((x: any) => x.id === move);
+    expect(out).toEqual(expect.objectContaining({ kind: 'dispatch', vehicleNo: 'SELF', partyId: party }));
+    expect(out.lines[0]).toEqual({ itemId: brand, sizeMm: 8, qty: 40, bundles: 4, rate: 4 });
+    expect(out.lines[1]).toEqual({ itemId: wire, sizeMm: 0, qty: 25, bundles: 0, rate: 0 });
+
+    const exp = await api('GET', `/firms/${fid}/export/backup`, undefined, tok);
+    expect(exp.body.materialItems.length).toBe(2);
+    expect(exp.body.materialMoves.length).toBe(2);
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=merge`, { ...exp.body, schemaVersion: 5 }, tok);
+    expect(restore.status).toBe(200);
+    expect(restore.body.imported.materialMoves).toBe(2);
+    expect(restore.body.imported.materialItems).toBe(2);
+
+    // Once nothing uses it, the item goes.
+    const delMoves = await push([
+      { op: 'delete', entity: 'materialMoves', id: move, rev: 2 },
+      { op: 'delete', entity: 'materialMoves', id: inbound, rev: 2 },
+    ]);
+    expect(delMoves.body.applied.length).toBe(2);
+    expect((await push([{ op: 'delete', entity: 'materialItems', id: brand }])).body.applied.length).toBe(1);
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

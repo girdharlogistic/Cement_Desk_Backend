@@ -22,6 +22,8 @@ export interface DepotRefs {
 
 export interface DepotPlan {
   labours: { id: string; name: string; phone: string | null; order: number }[];
+  materialItems: any[];
+  materialMoves: any[];
   settings: { unloadRate: number; directRate: number; loadRate: number } | null;
   trucks: any[];
   dispatches: any[];
@@ -125,19 +127,64 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     return [{ ...h, kind, gradeBags }];
   });
 
-  return { labours, settings, trucks, dispatches, adjustments };
+  // ---- steel and material ----
+  const materialItems = rows(body, 'materialItems').flatMap((r, i) => {
+    if (!isUuid(r?.id) || typeof r?.name !== 'string' || !r.name.trim()) {
+      warnings.push(`materialItems[${i}]: needs an id and a name — skipped`);
+      return [];
+    }
+    const kind = r.kind === 'steel' ? 'steel' : 'material';
+    const unit = String(r?.unit ?? 'pcs').slice(0, 12) || 'pcs';
+    const sizes = kind !== 'steel' ? [] : (Array.isArray(r.sizes) ? r.sizes : []).flatMap((z: any) =>
+      Number.isInteger(z?.sizeMm) && z.sizeMm > 0 && z.sizeMm <= 100
+        ? [{ sizeMm: z.sizeMm, rodsPerBundle: Math.max(0, num(z.rodsPerBundle)), kgPerRod: Math.max(0, num(z.kgPerRod)) }]
+        : []);
+    return [{
+      id: r.id, kind, name: String(r.name).trim().slice(0, 160),
+      unit: kind === 'steel' && unit !== 'kg' ? 'pcs' : unit,
+      category: kind === 'steel' ? 'steel' : ['bindingWire', 'coverBlock', 'chemical', 'other'].includes(r?.category) ? r.category : 'other',
+      sizes, loadRate: rate(r?.loadRate), unloadRate: rate(r?.unloadRate), order: Math.max(0, Math.trunc(num(r?.order))),
+    }];
+  });
+  const itemIds = new Set(materialItems.map((x) => x.id));
+  const materialMoves = rows(body, 'materialMoves').flatMap((r, i) => {
+    const date = parseBusinessDate(r?.date);
+    if (!isUuid(r?.id) || !date) { warnings.push(`materialMoves[${i}]: needs an id and a date — skipped`); return []; }
+    const kind = ['receive', 'dispatch', 'opening', 'adjust'].includes(r?.kind) ? r.kind : null;
+    if (!kind) { warnings.push(`materialMoves[${i}]: unknown kind — skipped`); return []; }
+    const partyId = isUuid(r?.partyId) && refs.parties.has(r.partyId) ? r.partyId : null;
+    if (kind === 'dispatch' && !partyId) { warnings.push(`materialMoves[${i}]: unknown customer — skipped`); return []; }
+    const lines = (Array.isArray(r?.lines) ? r.lines : []).flatMap((l: any) =>
+      isUuid(l?.itemId) && itemIds.has(l.itemId) && Number.isFinite(l?.qty) && Math.abs(l.qty) > 1e-9
+        ? [{ itemId: l.itemId, sizeMm: Number.isInteger(l?.sizeMm) ? l.sizeMm : 0, qty: l.qty, bundles: Math.max(0, num(l?.bundles)), rate: rate(l?.rate) }]
+        : []);
+    if (!lines.length) { warnings.push(`materialMoves[${i}]: no lines for known items — skipped`); return []; }
+    return [{
+      id: r.id, date, kind, partyId, supplier: String(r?.supplier ?? '').slice(0, 160),
+      address: String(r?.address ?? '').slice(0, 300), vehicleNo: String(r?.vehicleNo ?? '').toUpperCase().slice(0, 40),
+      labourId: labour(r?.labourId, `materialMoves[${i}]`), lines, note: String(r?.note ?? '').slice(0, 500),
+    }];
+  });
+
+  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves };
 }
 
 /** Tables a replace-mode import tombstones before writing the file's rows. */
-export const DEPOT_REPLACE_TABLES = ['labours', 'depot_trucks', 'depot_dispatches', 'depot_adjustments'];
+export const DEPOT_REPLACE_TABLES = [
+  'labours', 'depot_trucks', 'depot_dispatches', 'depot_adjustments', 'material_items', 'material_moves',
+];
 
 type Upsert = (c: Q, table: string, cols: string[], vals: unknown[]) => Promise<void>;
 type Write = (label: string, rows: unknown[][], fn: (c: Q, r: unknown[]) => Promise<void>) => Promise<void>;
 
-/** Labours first — the diary rows name them. */
+/** Labours and material items first — the diary rows name them. */
 export async function writeDepotLabours(p: DepotPlan, firmId: string, userId: string, write: Write, upsert: Upsert): Promise<void> {
   await write('labours', p.labours as any, (c, r: any) =>
     upsert(c, 'labours', ['firm_id', 'id', 'name', 'phone', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.phone, r.order, userId]));
+  await write('materialItems', p.materialItems as any, (c, r: any) =>
+    upsert(c, 'material_items',
+      ['firm_id', 'id', 'kind', 'name', 'unit', 'category', 'sizes', 'load_rate', 'unload_rate', 'sort_order', 'updated_by'],
+      [firmId, r.id, r.kind, r.name, r.unit, r.category, JSON.stringify(r.sizes), r.loadRate, r.unloadRate, r.order, userId]));
 }
 
 export async function writeDepotRecords(
@@ -171,6 +218,10 @@ export async function writeDepotRecords(
     upsert(c, 'depot_adjustments',
       ['firm_id', 'id', 'date', 'company_id', 'kind', 'grade_bags', 'note', 'updated_by'],
       [firmId, r.id, r.date, r.companyId, r.kind, JSON.stringify(r.gradeBags), r.note, userId]));
+  await write('materialMoves', p.materialMoves as any, (c, r: any) =>
+    upsert(c, 'material_moves',
+      ['firm_id', 'id', 'date', 'kind', 'party_id', 'supplier', 'address', 'vehicle_no', 'labour_id', 'lines', 'note', 'updated_by'],
+      [firmId, r.id, r.date, r.kind, r.partyId, r.supplier, r.address, r.vehicleNo, r.labourId, JSON.stringify(r.lines), r.note, userId]));
   return p.settings !== null;
 }
 
@@ -182,6 +233,8 @@ export function exportDepot(
   trucks: any[],
   dispatches: any[],
   adjustments: any[],
+  items: any[] = [],
+  moves: any[] = [],
 ): Record<string, unknown[]> {
   const live = (rs: any[]) => rs.filter((r) => !r.deleted_at);
   const json = (v: unknown) => {
@@ -190,6 +243,14 @@ export function exportDepot(
       return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
     } catch {
       return {};
+    }
+  };
+  const list = (v: unknown) => {
+    try {
+      const o = JSON.parse(String(v ?? '[]'));
+      return Array.isArray(o) ? o : [];
+    } catch {
+      return [];
     }
   };
   return {
@@ -209,6 +270,15 @@ export function exportDepot(
     })),
     depotAdjustments: live(adjustments).map((r) => ({
       id: r.id, firmId, date: r.date, companyId: r.company_id, kind: r.kind, gradeBags: json(r.grade_bags), note: r.note ?? '',
+    })),
+    materialItems: live(items).map((r) => ({
+      id: r.id, firmId, kind: r.kind, name: r.name, unit: r.unit, category: r.category, sizes: list(r.sizes),
+      loadRate: num(r.load_rate), unloadRate: num(r.unload_rate), order: Number(r.sort_order),
+    })),
+    materialMoves: live(moves).map((r) => ({
+      id: r.id, firmId, date: r.date, kind: r.kind, partyId: r.party_id ?? null, supplier: r.supplier ?? '',
+      address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', labourId: r.labour_id ?? null, lines: list(r.lines),
+      note: r.note ?? '',
     })),
   };
 }

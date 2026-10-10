@@ -305,12 +305,22 @@ JSON columns, not child tables — see the migration's header for why, and
 `json_each` in `depotUsage` for the one query that looks inside them.
 Godown stock is never stored; the app derives it.
 
+Migration `0005` adds the steel and material register: `material_items` (a
+steel brand with per-size `rodsPerBundle`/`kgPerRod`, or any other item with
+a unit) and `material_moves` (receive / dispatch / opening / adjust, lines as
+JSON with the labour units and rate frozen per line). Items are LWW; moves
+reject on rev mismatch; an item in use cannot be deleted.
+
 Two invariants worth knowing before touching masters:
 
 - `deleteWithCascade` now **refuses** (422) to delete a party, company, grade
   or labour that a live diary row uses. Checked first, so a refusal writes
   nothing. Party deletion used to always succeed — if a support request says
   "can't delete a customer", this is why.
+- The audit timestamps are zoneless UTC strings. Never `new Date(row.x)` or
+  `Date.parse(row.x)` one — go through `sqlToIso`. The box's zone moved to
+  IST on 2026-10-10 and the refresh grace window broke that way (`8194ed5`);
+  the integration suite runs in the machine's zone and catches it.
 - Backup import accepts `schemaVersion` 1–5 (it was 1–3, which made the app's
   own "Upload backup" fail from the steel release, schema 4, onward). Export
   still says 3 so older apps restore it.
