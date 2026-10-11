@@ -21,7 +21,10 @@ export interface DepotRefs {
 }
 
 export interface DepotPlan {
-  labours: { id: string; name: string; phone: string | null; order: number }[];
+  labours: {
+    id: string; name: string; phone: string | null; order: number;
+    unloadRate: number | null; directRate: number | null; loadRate: number | null;
+  }[];
   materialItems: any[];
   materialMoves: any[];
   settings: { unloadRate: number; directRate: number; loadRate: number } | null;
@@ -40,13 +43,22 @@ function rate(v: unknown): number {
   return n >= 0 && n <= 100_000 ? n : 0;
 }
 
+/** A gang's own rate, or null for "the firm's standard rate". */
+function gangRate(v: unknown): number | null {
+  return v === undefined || v === null || v === '' ? null : rate(v);
+}
+
 export function planDepot(body: any, refs: DepotRefs, warnings: string[]): DepotPlan {
   const labours = rows(body, 'labours').flatMap((r, i) => {
     if (!isUuid(r?.id) || typeof r?.name !== 'string' || !r.name.trim()) {
       warnings.push(`labours[${i}]: needs an id and a name — skipped`);
       return [];
     }
-    return [{ id: r.id, name: String(r.name).trim().slice(0, 160), phone: r?.phone ? String(r.phone).slice(0, 20) : null, order: Math.max(0, Math.trunc(num(r?.order))) }];
+    return [{
+      id: r.id, name: String(r.name).trim().slice(0, 160), phone: r?.phone ? String(r.phone).slice(0, 20) : null,
+      order: Math.max(0, Math.trunc(num(r?.order))),
+      unloadRate: gangRate(r?.unloadRate), directRate: gangRate(r?.directRate), loadRate: gangRate(r?.loadRate),
+    }];
   });
   const labourIds = new Set([...refs.labours, ...labours.map((l) => l.id)]);
 
@@ -97,7 +109,7 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
   const dispatches = rows(body, 'depotDispatches').flatMap((r, i) => {
     const h = head(r, 'depotDispatches', i);
     if (!h) return [];
-    if (!refs.parties.has(r?.partyId)) { warnings.push(`depotDispatches[${i}]: unknown customer — skipped`); return []; }
+    if (!refs.parties.has(r?.partyId)) { warnings.push(`depotDispatches[${i}]: unknown dealer — skipped`); return []; }
     const gradeBags = grades(r?.gradeBags, `depotDispatches[${i}].gradeBags`);
     if (!gradeBags || !Object.keys(gradeBags).length) { warnings.push(`depotDispatches[${i}]: no bags — skipped`); return []; }
     // A direct delivery whose truck did not make it into the file is still a
@@ -111,7 +123,8 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
       truckId = null;
     }
     return [{
-      ...h, source, truckId, partyId: r.partyId, address: String(r?.address ?? '').slice(0, 300),
+      ...h, source, truckId, partyId: r.partyId, customer: String(r?.customer ?? '').trim().slice(0, 160),
+      address: String(r?.address ?? '').slice(0, 300),
       vehicleNo: String(r?.vehicleNo ?? '').toUpperCase().slice(0, 40), gradeBags,
       labourId: labour(r?.labourId, `depotDispatches[${i}]`), labourRate: rate(r?.labourRate),
       freightEntryId: isUuid(r?.freightEntryId) ? r.freightEntryId : null,
@@ -154,14 +167,15 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     const kind = ['receive', 'dispatch', 'opening', 'adjust'].includes(r?.kind) ? r.kind : null;
     if (!kind) { warnings.push(`materialMoves[${i}]: unknown kind — skipped`); return []; }
     const partyId = isUuid(r?.partyId) && refs.parties.has(r.partyId) ? r.partyId : null;
-    if (kind === 'dispatch' && !partyId) { warnings.push(`materialMoves[${i}]: unknown customer — skipped`); return []; }
+    if (kind === 'dispatch' && !partyId) { warnings.push(`materialMoves[${i}]: unknown dealer — skipped`); return []; }
     const lines = (Array.isArray(r?.lines) ? r.lines : []).flatMap((l: any) =>
       isUuid(l?.itemId) && itemIds.has(l.itemId) && Number.isFinite(l?.qty) && Math.abs(l.qty) > 1e-9
         ? [{ itemId: l.itemId, sizeMm: Number.isInteger(l?.sizeMm) ? l.sizeMm : 0, qty: l.qty, bundles: Math.max(0, num(l?.bundles)), rate: rate(l?.rate) }]
         : []);
     if (!lines.length) { warnings.push(`materialMoves[${i}]: no lines for known items — skipped`); return []; }
     return [{
-      id: r.id, date, kind, partyId, supplier: String(r?.supplier ?? '').slice(0, 160),
+      id: r.id, date, kind, partyId, customer: String(r?.customer ?? '').trim().slice(0, 160),
+      supplier: String(r?.supplier ?? '').slice(0, 160),
       address: String(r?.address ?? '').slice(0, 300), vehicleNo: String(r?.vehicleNo ?? '').toUpperCase().slice(0, 40),
       labourId: labour(r?.labourId, `materialMoves[${i}]`), lines, note: String(r?.note ?? '').slice(0, 500),
     }];
@@ -181,7 +195,8 @@ type Write = (label: string, rows: unknown[][], fn: (c: Q, r: unknown[]) => Prom
 /** Labours and material items first — the diary rows name them. */
 export async function writeDepotLabours(p: DepotPlan, firmId: string, userId: string, write: Write, upsert: Upsert): Promise<void> {
   await write('labours', p.labours as any, (c, r: any) =>
-    upsert(c, 'labours', ['firm_id', 'id', 'name', 'phone', 'sort_order', 'updated_by'], [firmId, r.id, r.name, r.phone, r.order, userId]));
+    upsert(c, 'labours', ['firm_id', 'id', 'name', 'phone', 'sort_order', 'unload_rate', 'direct_rate', 'load_rate', 'updated_by'],
+      [firmId, r.id, r.name, r.phone, r.order, r.unloadRate, r.directRate, r.loadRate, userId]));
   await write('materialItems', p.materialItems as any, (c, r: any) =>
     upsert(c, 'material_items',
       ['firm_id', 'id', 'kind', 'name', 'unit', 'category', 'sizes', 'load_rate', 'unload_rate', 'sort_order', 'updated_by'],
@@ -213,16 +228,16 @@ export async function writeDepotRecords(
       [firmId, r.id, r.date, r.companyId, r.truckNo, r.ref, JSON.stringify(r.received), JSON.stringify(r.godown), JSON.stringify(r.short), r.labourId, r.unloadRate, r.note, userId]));
   await write('depotDispatches', p.dispatches as any, (c, r: any) =>
     upsert(c, 'depot_dispatches',
-      ['firm_id', 'id', 'date', 'company_id', 'source', 'truck_id', 'party_id', 'address', 'vehicle_no', 'grade_bags', 'labour_id', 'labour_rate', 'note', 'freight_entry_id', 'updated_by'],
-      [firmId, r.id, r.date, r.companyId, r.source, r.truckId, r.partyId, r.address, r.vehicleNo, JSON.stringify(r.gradeBags), r.labourId, r.labourRate, r.note, r.freightEntryId, userId]));
+      ['firm_id', 'id', 'date', 'company_id', 'source', 'truck_id', 'party_id', 'customer', 'address', 'vehicle_no', 'grade_bags', 'labour_id', 'labour_rate', 'note', 'freight_entry_id', 'updated_by'],
+      [firmId, r.id, r.date, r.companyId, r.source, r.truckId, r.partyId, r.customer, r.address, r.vehicleNo, JSON.stringify(r.gradeBags), r.labourId, r.labourRate, r.note, r.freightEntryId, userId]));
   await write('depotAdjustments', p.adjustments as any, (c, r: any) =>
     upsert(c, 'depot_adjustments',
       ['firm_id', 'id', 'date', 'company_id', 'kind', 'grade_bags', 'note', 'updated_by'],
       [firmId, r.id, r.date, r.companyId, r.kind, JSON.stringify(r.gradeBags), r.note, userId]));
   await write('materialMoves', p.materialMoves as any, (c, r: any) =>
     upsert(c, 'material_moves',
-      ['firm_id', 'id', 'date', 'kind', 'party_id', 'supplier', 'address', 'vehicle_no', 'labour_id', 'lines', 'note', 'updated_by'],
-      [firmId, r.id, r.date, r.kind, r.partyId, r.supplier, r.address, r.vehicleNo, r.labourId, JSON.stringify(r.lines), r.note, userId]));
+      ['firm_id', 'id', 'date', 'kind', 'party_id', 'customer', 'supplier', 'address', 'vehicle_no', 'labour_id', 'lines', 'note', 'updated_by'],
+      [firmId, r.id, r.date, r.kind, r.partyId, r.customer, r.supplier, r.address, r.vehicleNo, r.labourId, JSON.stringify(r.lines), r.note, userId]));
   return p.settings !== null;
 }
 
@@ -255,7 +270,12 @@ export function exportDepot(
     }
   };
   return {
-    labours: live(labours).map((r) => ({ id: r.id, firmId, name: r.name, phone: r.phone ?? null, order: Number(r.sort_order) })),
+    labours: live(labours).map((r) => ({
+      id: r.id, firmId, name: r.name, phone: r.phone ?? null, order: Number(r.sort_order),
+      unloadRate: r.unload_rate == null ? null : num(r.unload_rate),
+      directRate: r.direct_rate == null ? null : num(r.direct_rate),
+      loadRate: r.load_rate == null ? null : num(r.load_rate),
+    })),
     depotSettings: live(settings).map((r) => ({
       firmId, unloadRate: num(r.unload_rate), directRate: num(r.direct_rate), loadRate: num(r.load_rate),
     })),
@@ -266,7 +286,7 @@ export function exportDepot(
     })),
     depotDispatches: live(dispatches).map((r) => ({
       id: r.id, firmId, date: r.date, companyId: r.company_id, source: r.source, truckId: r.truck_id ?? null,
-      partyId: r.party_id, address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', gradeBags: json(r.grade_bags),
+      partyId: r.party_id, customer: r.customer ?? '', address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', gradeBags: json(r.grade_bags),
       labourId: r.labour_id ?? null, labourRate: num(r.labour_rate), note: r.note ?? '',
       freightEntryId: r.freight_entry_id ?? null,
     })),
@@ -278,7 +298,7 @@ export function exportDepot(
       loadRate: num(r.load_rate), unloadRate: num(r.unload_rate), order: Number(r.sort_order),
     })),
     materialMoves: live(moves).map((r) => ({
-      id: r.id, firmId, date: r.date, kind: r.kind, partyId: r.party_id ?? null, supplier: r.supplier ?? '',
+      id: r.id, firmId, date: r.date, kind: r.kind, partyId: r.party_id ?? null, customer: r.customer ?? '', supplier: r.supplier ?? '',
       address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', labourId: r.labour_id ?? null, lines: list(r.lines),
       note: r.note ?? '',
     })),

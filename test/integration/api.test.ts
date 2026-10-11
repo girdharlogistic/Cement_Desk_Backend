@@ -662,6 +662,77 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect((await push([{ op: 'delete', entity: 'materialItems', id: brand }])).body.applied.length).toBe(1);
   });
 
+  it('depot diary: dealer and customer apart, rates per gang', async () => {
+    const f = await api('POST', '/firms', { name: `Dealer-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(980), mutations }, tok);
+    const [dealer, company, javed, shyam, out, brand, steelOut] = [U(981), U(982), U(983), U(984), U(985), U(986), U(987)];
+
+    const masters = await push([
+      { op: 'upsert', entity: 'grades', id: gradeA, data: { name: 'PPC', order: 0 } },
+      { op: 'upsert', entity: 'parties', id: dealer, data: { name: 'Khushwah Traders', order: 0 } },
+      { op: 'upsert', entity: 'companies', id: company, data: { name: 'JK Cement', order: 0 } },
+      // Javed has his own rates; Shyam is paid the standard ones (null).
+      { op: 'upsert', entity: 'labours', id: javed, data: { name: 'Javed', order: 0, unloadRate: 2.5, directRate: 2, loadRate: 4 } },
+      { op: 'upsert', entity: 'labours', id: shyam, data: { name: 'Shyam', order: 1 } },
+      { op: 'upsert', entity: 'materialItems', id: brand, data: { kind: 'steel', name: 'Kamdhenu', unit: 'pcs', sizes: [{ sizeMm: 12, rodsPerBundle: 5, kgPerRod: 10.66 }] } },
+    ]);
+    expect(masters.body.rejected).toEqual([]);
+
+    // A negative gang rate is refused like any other bad master field.
+    const badRate = await push([{ op: 'upsert', entity: 'labours', id: U(988), data: { name: 'X', loadRate: -1 } }]);
+    expect(badRate.body.rejected[0].code).toBe('VALIDATION_FAILED');
+
+    const rows = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, data: {
+        date: DAY, companyId: company, partyId: dealer, customer: '  Ramesh Ji  ', address: 'Chatarpura',
+        gradeBags: { [gradeA]: 200 }, labourId: javed, labourRate: 4,
+      } },
+      { op: 'upsert', entity: 'materialMoves', id: steelOut, data: {
+        date: DAY, kind: 'dispatch', partyId: dealer, customer: 'Site at Pur road',
+        lines: [{ itemId: brand, sizeMm: 12, qty: 50, bundles: 10, rate: 0 }],
+      } },
+    ]);
+    expect(rows.body.rejected).toEqual([]);
+
+    // An app from before the customer field edits the dispatch without the
+    // key — the customer must survive it. A rename from such an app must not
+    // reset a gang's rates either.
+    const old = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, rev: 1, data: {
+        date: DAY, companyId: company, partyId: dealer, address: 'Chatarpura', gradeBags: { [gradeA]: 210 }, labourId: javed, labourRate: 4,
+      } },
+      { op: 'upsert', entity: 'labours', id: javed, data: { name: 'Javed gang', order: 0 } },
+    ]);
+    expect(old.body.rejected).toEqual([]);
+
+    const ch = (await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok)).body.changes;
+    const d = ch.depotDispatches.find((x: any) => x.id === out);
+    expect(d).toEqual(expect.objectContaining({ partyId: dealer, customer: 'Ramesh Ji', gradeBags: { [gradeA]: 210 } }));
+    expect(ch.materialMoves.find((x: any) => x.id === steelOut).customer).toBe('Site at Pur road');
+    const gangs = Object.fromEntries(ch.labours.map((l: any) => [l.id, l]));
+    expect(gangs[javed]).toEqual(expect.objectContaining({ name: 'Javed gang', unloadRate: 2.5, directRate: 2, loadRate: 4 }));
+    expect(gangs[shyam]).toEqual(expect.objectContaining({ unloadRate: null, directRate: null, loadRate: null }));
+
+    // Sending null puts a gang back on the standard rate.
+    await push([{ op: 'upsert', entity: 'labours', id: javed, data: { name: 'Javed gang', loadRate: null } }]);
+    const again = (await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok)).body.changes;
+    expect(again.labours.find((l: any) => l.id === javed)).toEqual(expect.objectContaining({ unloadRate: 2.5, loadRate: null }));
+
+    // The backup carries all of it, and a restore brings it back.
+    const exp = await api('GET', `/firms/${fid}/export/backup`, undefined, tok);
+    expect(exp.body.depotDispatches[0].customer).toBe('Ramesh Ji');
+    expect(exp.body.materialMoves[0].customer).toBe('Site at Pur road');
+    expect(exp.body.labours.find((l: any) => l.id === javed).unloadRate).toBe(2.5);
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=replace`, { ...exp.body, schemaVersion: 5, confirmReplace: true }, tok);
+    expect(restore.status).toBe(200);
+    const back = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(back.depotDispatches[0].customer).toBe('Ramesh Ji');
+    expect(back.labours.find((l: any) => l.id === javed)).toEqual(expect.objectContaining({ unloadRate: 2.5, directRate: 2, loadRate: null }));
+    expect(back.labours.find((l: any) => l.id === shyam).unloadRate).toBeNull();
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

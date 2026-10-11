@@ -27,6 +27,8 @@ const phone = z.string().max(20).nullish();
 const orderField = z.number().int().min(0).max(1_000_000).optional();
 const idField = z.string().uuid().optional();
 const name160 = z.string().min(1).max(160);
+/** A gang's own ₹/bag; null falls back to the firm's standard rate. */
+const gangRate = z.number().min(0).max(100_000).nullish();
 
 export const MASTER_DEFS: MasterDef[] = [
   {
@@ -158,19 +160,31 @@ export const MASTER_DEFS: MasterDef[] = [
     }),
     orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',
   },
-  // Loading gangs for the depot diary. A name, a phone and a place in the
-  // list — a master in every respect, so it takes the master machinery. What
-  // they are paid lives on the diary rows (frozen) and in depot_settings, not
-  // here: a rate change must not re-price work already done.
+  // Loading gangs for the depot diary. A name, a phone, a place in the list
+  // and, since 0007, the gang's own ₹/bag rates — null meaning "the firm's
+  // standard rate" from depot_settings. These only price *new* diary rows;
+  // every row freezes the rate it was saved under, so changing a gang's rate
+  // never re-prices work already done.
   {
     apiName: 'labours',
     table: 'labours',
-    createSchema: z.object({ id: idField, name: name160, phone, order: orderField }),
-    patchSchema: z.object({ name: name160.optional(), phone, order: orderField }),
+    createSchema: z.object({
+      id: idField, name: name160, phone, order: orderField,
+      unloadRate: gangRate, directRate: gangRate, loadRate: gangRate,
+    }),
+    patchSchema: z.object({
+      name: name160.optional(), phone, order: orderField,
+      unloadRate: gangRate, directRate: gangRate, loadRate: gangRate,
+    }),
+    // Rates only when sent: an app from before gang rates renames a gang
+    // without the keys, and that rename must not reset its rates.
     toCols: (b) => ({
       ...(b.name !== undefined ? { name: b.name } : {}),
       ...(b.phone !== undefined ? { phone: b.phone ?? null } : {}),
       ...(b.order !== undefined ? { sort_order: b.order } : {}),
+      ...(b.unloadRate !== undefined ? { unload_rate: b.unloadRate ?? null } : {}),
+      ...(b.directRate !== undefined ? { direct_rate: b.directRate ?? null } : {}),
+      ...(b.loadRate !== undefined ? { load_rate: b.loadRate ?? null } : {}),
     }),
     mapRow: (r) => ({
       id: r.id,
@@ -178,6 +192,9 @@ export const MASTER_DEFS: MasterDef[] = [
       name: r.name,
       phone: r.phone ?? null,
       order: Number(r.sort_order),
+      unloadRate: r.unload_rate == null ? null : num(r.unload_rate),
+      directRate: r.direct_rate == null ? null : num(r.direct_rate),
+      loadRate: r.load_rate == null ? null : num(r.load_rate),
       ...syncMeta(r),
     }),
     orderBy: 'ORDER BY sort_order ASC, LOWER(name) ASC',

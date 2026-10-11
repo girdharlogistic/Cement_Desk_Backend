@@ -128,6 +128,7 @@ export function mapDepotDispatch(r: any): any {
     source: r.source,
     truckId: r.truck_id ?? null,
     partyId: r.party_id,
+    customer: r.customer ?? '',
     address: r.address ?? '',
     vehicleNo: r.vehicle_no ?? '',
     gradeBags: parseJson(r.grade_bags),
@@ -187,6 +188,7 @@ export function mapMaterialMove(r: any): any {
     date: r.date,
     kind: r.kind,
     partyId: r.party_id ?? null,
+    customer: r.customer ?? '',
     supplier: r.supplier ?? '',
     address: r.address ?? '',
     vehicleNo: r.vehicle_no ?? '',
@@ -301,6 +303,16 @@ const TRUCKS: RecordDef = {
   },
 };
 
+/**
+ * The dealer's customer, only when sent. `partyId` is the dealer; this is who
+ * the dealer sold to. An app from before the field existed edits a dispatch
+ * without the key, and that edit must not wipe a customer a newer phone
+ * wrote — the same rule as the freight link below.
+ */
+function customerColumn(d: any): { customer?: string } {
+  return 'customer' in d ? { customer: readText(d.customer, 160) } : {};
+}
+
 const DISPATCHES: RecordDef = {
   table: 'depot_dispatches',
   columns(d) {
@@ -317,6 +329,7 @@ const DISPATCHES: RecordDef = {
       source,
       truck_id: source === 'truck' ? truckId : null,
       party_id: d.partyId,
+      ...customerColumn(d),
       address: readText(d.address, 300),
       vehicle_no: readText(d.vehicleNo, 40).toUpperCase(),
       grade_bags: JSON.stringify(gradeBags),
@@ -380,11 +393,12 @@ const MOVES: RecordDef = {
     });
     if (lines.every((l) => Math.abs(l.qty) < 1e-9)) bad('A move needs a quantity on at least one line');
     const partyId = readOptionalId(d.partyId, 'partyId');
-    if (kind === 'dispatch' && !partyId) bad('A dispatch needs the customer');
+    if (kind === 'dispatch' && !partyId) bad('A dispatch needs the dealer');
     return {
       date: readDate(d.date),
       kind,
       party_id: partyId,
+      ...customerColumn(d),
       supplier: readText(d.supplier, 160),
       address: readText(d.address, 300),
       vehicle_no: readText(d.vehicleNo, 40).toUpperCase(),

@@ -439,7 +439,7 @@ tombstoned record. Treat 200 and 201 the same way.
 | `companies` | `{ id?, name, order? }` | `order` |
 | `sources` | `{ id?, name, type?, order? }` | `type` (`plant`/`depot`, default `plant`) |
 | `schemeFolders` | `{ id?, name, order? }` | `order` |
-| `labours` | `{ id?, name, phone?, order? }` | `phone`, `order` — loading gangs for the depot diary (§10b) |
+| `labours` | `{ id?, name, phone?, order?, unloadRate?, directRate?, loadRate? }` | `phone`, `order`, the three rates — loading gangs for the depot diary (§10b). A rate is the gang's own ₹/bag; `null` means "the firm's standard rate" from `depotSettings`. Each rate is only written when its key is sent. |
 
 `name` is 1–160 chars (1–80 for grades). `order` is 0–1,000,000. PATCH bodies are the same
 fields, all optional, minus `id`.
@@ -917,8 +917,12 @@ All grade quantities are objects of `gradeId → bags`. Zero lines are dropped o
 |---|---|---|
 | `depotSettings` | `{ unloadRate, directRate, loadRate }` — ₹ per bag | One per firm. Push `id` = **the firm id** (like `baseline`). In a pull it is a **list of at most one**, not a bare object. Upsert only. |
 | `depotTrucks` | `{ date, companyId, truckNo, ref, received{}, godown{}, short{}, labourId?, unloadRate, note }` | `received` must hold at least one bag. `truckNo` is upper-cased. |
-| `depotDispatches` | `{ date, companyId, source, truckId?, partyId, address, vehicleNo, gradeBags{}, labourId?, labourRate, note, freightEntryId? }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. |
+| `depotDispatches` | `{ date, companyId, source, truckId?, partyId, customer?, address, vehicleNo, gradeBags{}, labourId?, labourRate, note, freightEntryId? }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. `partyId` is the **dealer**; `customer` is who the dealer sold to (free text, may be empty). |
 | `depotAdjustments` | `{ date, companyId, kind, gradeBags{}, note }` | `kind` is `opening` (positive), `damage` (**negative** bags) or `correction` (either sign). |
+
+`customer` (migration 0007) is free text, trimmed, at most 160 characters. Like
+`freightEntryId` below, it is only written when the key is **present**, so an older client's
+edit cannot blank it.
 
 `freightEntryId` is the freight voucher the dispatch was turned into (migration 0006). It is
 only written when the key is **present** — an older client's edit that leaves it out keeps the
@@ -926,8 +930,9 @@ link — so send it (as `null` to unlink) whenever you send it at all. No foreig
 deleted voucher means no link.
 
 Rates are **frozen on each row** (`unloadRate`, `labourRate`), like freight rates: changing
-`depotSettings` re-prices nothing by itself. The app re-prices from a date the user picks by
-pushing the affected rows.
+`depotSettings` or a gang's rates re-prices nothing by itself. A new row is priced at its gang's
+own rate when the gang has one, else at `depotSettings`. The app re-prices from a date the user
+picks by pushing the affected rows.
 
 Deleting a truck **also tombstones its direct deliveries** (`depotDispatches` with that
 `truckId`). The app sends those deletes itself; the server cascade is the backstop.
@@ -943,7 +948,7 @@ Two more sync entities, independent of any cement company:
 | Entity | Shape (`data`) | Rules |
 |---|---|---|
 | `materialItems` | `{ kind, name, unit, category, sizes[], loadRate, unloadRate, order }` | `kind` is `"steel"` (a brand) or `"material"`. Steel `unit` is `"pcs"` or `"kg"`; `sizes` is `[{ sizeMm, rodsPerBundle, kgPerRod }]` and is cleared for non-steel. `category` is `steel` for a brand, else `bindingWire`/`coverBlock`/`chemical`/`other`. Rates are ₹ per bundle (steel) or per unit. **Last-write-wins.** Delete is refused (`BUSINESS_RULE_VIOLATION`) while any live move uses the item. |
-| `materialMoves` | `{ date, kind, partyId?, supplier, address, vehicleNo, labourId?, lines[], note }` | `kind` is `receive`, `dispatch` (needs `partyId`), `opening` or `adjust` (the only kind whose `qty` may be negative). Each line is `{ itemId, sizeMm, qty, bundles, rate }` — `sizeMm` is 0 for an item without sizes; `bundles` is the count the labour rate applies to (bundles for steel, the quantity otherwise), frozen like `rate`. **Reject on `rev` mismatch.** |
+| `materialMoves` | `{ date, kind, partyId?, customer?, supplier, address, vehicleNo, labourId?, lines[], note }` | `kind` is `receive`, `dispatch` (needs `partyId`, the dealer; `customer` as on a cement dispatch), `opening` or `adjust` (the only kind whose `qty` may be negative). Each line is `{ itemId, sizeMm, qty, bundles, rate }` — `sizeMm` is 0 for an item without sizes; `bundles` is the count the labour rate applies to (bundles for steel, the quantity otherwise), frozen like `rate`. **Reject on `rev` mismatch.** |
 
 Steel stock is kept per `(itemId, sizeMm)` in the item's own unit, derived the same way as
 godown cement. Parties and labours used by a move cannot be deleted either.
