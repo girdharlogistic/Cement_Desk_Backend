@@ -305,6 +305,10 @@ JSON columns, not child tables — see the migration's header for why, and
 `json_each` in `depotUsage` for the one query that looks inside them.
 Godown stock is never stored; the app derives it.
 
+Migration `0006` adds `depot_dispatches.freight_entry_id`, the voucher a
+dispatch was turned into. Written only when the key is in the push, so an
+older app's edit cannot unlink it.
+
 Migration `0005` adds the steel and material register: `material_items` (a
 steel brand with per-size `rodsPerBundle`/`kgPerRod`, or any other item with
 a unit) and `material_moves` (receive / dispatch / opening / adjust, lines as

@@ -114,6 +114,7 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
       ...h, source, truckId, partyId: r.partyId, address: String(r?.address ?? '').slice(0, 300),
       vehicleNo: String(r?.vehicleNo ?? '').toUpperCase().slice(0, 40), gradeBags,
       labourId: labour(r?.labourId, `depotDispatches[${i}]`), labourRate: rate(r?.labourRate),
+      freightEntryId: isUuid(r?.freightEntryId) ? r.freightEntryId : null,
     }];
   });
 
@@ -212,8 +213,8 @@ export async function writeDepotRecords(
       [firmId, r.id, r.date, r.companyId, r.truckNo, r.ref, JSON.stringify(r.received), JSON.stringify(r.godown), JSON.stringify(r.short), r.labourId, r.unloadRate, r.note, userId]));
   await write('depotDispatches', p.dispatches as any, (c, r: any) =>
     upsert(c, 'depot_dispatches',
-      ['firm_id', 'id', 'date', 'company_id', 'source', 'truck_id', 'party_id', 'address', 'vehicle_no', 'grade_bags', 'labour_id', 'labour_rate', 'note', 'updated_by'],
-      [firmId, r.id, r.date, r.companyId, r.source, r.truckId, r.partyId, r.address, r.vehicleNo, JSON.stringify(r.gradeBags), r.labourId, r.labourRate, r.note, userId]));
+      ['firm_id', 'id', 'date', 'company_id', 'source', 'truck_id', 'party_id', 'address', 'vehicle_no', 'grade_bags', 'labour_id', 'labour_rate', 'note', 'freight_entry_id', 'updated_by'],
+      [firmId, r.id, r.date, r.companyId, r.source, r.truckId, r.partyId, r.address, r.vehicleNo, JSON.stringify(r.gradeBags), r.labourId, r.labourRate, r.note, r.freightEntryId, userId]));
   await write('depotAdjustments', p.adjustments as any, (c, r: any) =>
     upsert(c, 'depot_adjustments',
       ['firm_id', 'id', 'date', 'company_id', 'kind', 'grade_bags', 'note', 'updated_by'],
@@ -267,6 +268,7 @@ export function exportDepot(
       id: r.id, firmId, date: r.date, companyId: r.company_id, source: r.source, truckId: r.truck_id ?? null,
       partyId: r.party_id, address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', gradeBags: json(r.grade_bags),
       labourId: r.labour_id ?? null, labourRate: num(r.labour_rate), note: r.note ?? '',
+      freightEntryId: r.freight_entry_id ?? null,
     })),
     depotAdjustments: live(adjustments).map((r) => ({
       id: r.id, firmId, date: r.date, companyId: r.company_id, kind: r.kind, gradeBags: json(r.grade_bags), note: r.note ?? '',

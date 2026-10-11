@@ -917,8 +917,13 @@ All grade quantities are objects of `gradeId → bags`. Zero lines are dropped o
 |---|---|---|
 | `depotSettings` | `{ unloadRate, directRate, loadRate }` — ₹ per bag | One per firm. Push `id` = **the firm id** (like `baseline`). In a pull it is a **list of at most one**, not a bare object. Upsert only. |
 | `depotTrucks` | `{ date, companyId, truckNo, ref, received{}, godown{}, short{}, labourId?, unloadRate, note }` | `received` must hold at least one bag. `truckNo` is upper-cased. |
-| `depotDispatches` | `{ date, companyId, source, truckId?, partyId, address, vehicleNo, gradeBags{}, labourId?, labourRate, note }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. |
+| `depotDispatches` | `{ date, companyId, source, truckId?, partyId, address, vehicleNo, gradeBags{}, labourId?, labourRate, note, freightEntryId? }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. |
 | `depotAdjustments` | `{ date, companyId, kind, gradeBags{}, note }` | `kind` is `opening` (positive), `damage` (**negative** bags) or `correction` (either sign). |
+
+`freightEntryId` is the freight voucher the dispatch was turned into (migration 0006). It is
+only written when the key is **present** — an older client's edit that leaves it out keeps the
+link — so send it (as `null` to unlink) whenever you send it at all. No foreign key: a link to a
+deleted voucher means no link.
 
 Rates are **frozen on each row** (`unloadRate`, `labourRate`), like freight rates: changing
 `depotSettings` re-prices nothing by itself. The app re-prices from a date the user picks by

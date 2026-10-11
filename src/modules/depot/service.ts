@@ -134,6 +134,7 @@ export function mapDepotDispatch(r: any): any {
     labourId: r.labour_id ?? null,
     labourRate: num(r.labour_rate),
     note: r.note ?? '',
+    freightEntryId: r.freight_entry_id ?? null,
     ...syncMeta(r),
   };
 }
@@ -322,6 +323,10 @@ const DISPATCHES: RecordDef = {
       labour_id: readOptionalId(d.labourId, 'labourId'),
       labour_rate: readRate(d.labourRate, 'labourRate'),
       note: readText(d.note, 500),
+      // Only when sent. An app from before the link existed edits a dispatch
+      // without the key, and that edit must not unlink a voucher a newer
+      // phone attached.
+      ...('freightEntryId' in d ? { freight_entry_id: readOptionalId(d.freightEntryId, 'freightEntryId') } : {}),
     };
   },
   map: mapDepotDispatch,

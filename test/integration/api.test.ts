@@ -533,6 +533,17 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     ]);
     expect(fresh.body.applied[0].rev).toBe(2);
 
+    // Linking a freight voucher sticks, and an edit that does not mention
+    // the link (an older app) leaves it alone.
+    const linked = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, rev: 2, data: { date: DAY, companyId: company, partyId: party, vehicleNo: 'RJ06 CB 1122', gradeBags: { [gradeA]: 60 }, labourId: labour, labourRate: 3.5, freightEntryId: U(958) } },
+    ]);
+    expect(linked.body.applied[0].rev).toBe(3);
+    const silent = await push([
+      { op: 'upsert', entity: 'depotDispatches', id: out, rev: 3, data: { date: DAY, companyId: company, partyId: party, vehicleNo: 'RJ06 CB 1122', gradeBags: { [gradeA]: 60 }, labourId: labour, labourRate: 3.5 } },
+    ]);
+    expect(silent.body.applied[0].rev).toBe(4);
+
     // Masters the diary uses cannot be deleted out from under it.
     for (const [kind, id] of [['parties', party], ['companies', company], ['grades', gradeA], ['labours', labour]] as const) {
       const del = await api('DELETE', `/firms/${fid}/${kind}/${id}`, undefined, tok);
@@ -546,7 +557,7 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(ch.depotTrucks[0]).toEqual(expect.objectContaining({ truckNo: 'RJ09 GA 4521', received: { [gradeA]: 600 }, godown: { [gradeA]: 350 } }));
     const byId = Object.fromEntries(ch.depotDispatches.map((d: any) => [d.id, d]));
     expect(byId[direct]).toEqual(expect.objectContaining({ source: 'truck', truckId: truck, vehicleNo: 'SELF' }));
-    expect(byId[out]).toEqual(expect.objectContaining({ source: 'godown', truckId: null, gradeBags: { [gradeA]: 60 } }));
+    expect(byId[out]).toEqual(expect.objectContaining({ source: 'godown', truckId: null, gradeBags: { [gradeA]: 60 }, freightEntryId: U(958) }));
     expect(ch.depotAdjustments[0].kind).toBe('opening');
 
     const counts = await api('GET', `/firms/${fid}/sync/counts`, undefined, tok);
