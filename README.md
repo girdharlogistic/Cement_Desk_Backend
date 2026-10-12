@@ -58,7 +58,7 @@ Public endpoints (behind a Cloudflare tunnel):
   background handler Firebase's SDK looks for. No token table: the app
   re-registers on every launch, exactly as the Android side re-subscribes.
 - **The web app** — the Flutter client, built for the browser, served at
-  `/app/` from `WEBAPP_DIR` (`/home/ubuntu/cementdesk-webapp`, outside both
+  `/app/` from `WEBAPP_DIR` (`/home/ubuntu/CementDesk/webapp`, outside both
   repos). Same origin as the API on purpose: the PWA's requests are
   same-origin, so no CORS and no second hostname in the tunnel. `/` stays the
   marketing page and carries the **Add to Home Screen** button; `/sw.js` is

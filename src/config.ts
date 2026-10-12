@@ -17,7 +17,7 @@ const EnvSchema = z.object({
    * not be able to delete the books. The directory is created at boot if it is
    * not there, and the WAL and shared-memory files live beside it.
    */
-  SQLITE_PATH: z.string().min(1).default('/home/ubuntu/cementdesk-data/cementdesk.db'),
+  SQLITE_PATH: z.string().min(1).default('/home/ubuntu/CementDesk/data/cementdesk.db'),
 
   /**
    * Where the nightly `VACUUM INTO` snapshots go, and how many to keep. Empty
@@ -42,7 +42,7 @@ const EnvSchema = z.object({
    * A missing directory is not fatal — `/app/` answers 503 and everything
    * else on this server carries on.
    */
-  WEBAPP_DIR: z.string().min(1).default('/home/ubuntu/cementdesk-webapp'),
+  WEBAPP_DIR: z.string().min(1).default('/home/ubuntu/CementDesk/webapp'),
 
   /**
    * Extra origins allowed to call `/api/v1` cross-site, comma separated.

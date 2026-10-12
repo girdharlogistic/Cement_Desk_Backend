@@ -35,7 +35,7 @@ So:
 The service runs from `dist/`, so editing a `.ts` changes nothing until:
 
 ```bash
-cd /home/ubuntu/Cement_Desk_Backend && npm run build && \
+cd /home/ubuntu/CementDesk/backend && npm run build && \
   sudo systemctl restart cementdesk-backend && sleep 2 && \
   curl -s http://127.0.0.1:8994/health
 ```
@@ -62,9 +62,9 @@ on untouched files).
 ### The PWA is deployed from the other repo
 
 `/app/` serves the Flutter web build out of `WEBAPP_DIR`
-(`/home/ubuntu/cementdesk-webapp`), which is **not** in either repo — same
+(`/home/ubuntu/CementDesk/webapp`), which is **not** in either repo — same
 reason as `SQLITE_PATH`: a `git clean` must not be able to take the product
-down. Deploying it is `tools/build_pwa.sh` in `Cement_Desk_Android`, which
+down. Deploying it is `tools/build_pwa.sh` in `~/CementDesk/android`, which
 rsyncs `build/web` there. This service reads the directory per request, so a
 deploy needs **no build and no restart here**. A restart is only needed if you
 changed `src/modules/webapp/` itself.
