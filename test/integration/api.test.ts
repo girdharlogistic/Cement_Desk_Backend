@@ -733,6 +733,102 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(back.labours.find((l: any) => l.id === shyam).unloadRate).toBeNull();
   });
 
+  it('depot diary: returns, sand and gitti, day notes', async () => {
+    const f = await api('POST', '/firms', { name: `Returns-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(1000), mutations }, tok);
+    const [dealer, company, javed, brand, bajri, cementBack, steelBack, note, steelNote] =
+      [U(1001), U(1002), U(1003), U(1004), U(1005), U(1006), U(1007), U(1008), U(1009)];
+
+    const masters = await push([
+      { op: 'upsert', entity: 'grades', id: gradeA, data: { name: 'PPC', order: 0 } },
+      { op: 'upsert', entity: 'parties', id: dealer, data: { name: 'Yash Traders', order: 0 } },
+      { op: 'upsert', entity: 'companies', id: company, data: { name: 'JK Cement', order: 0 } },
+      { op: 'upsert', entity: 'labours', id: javed, data: { name: 'Javed', order: 0 } },
+      { op: 'upsert', entity: 'materialItems', id: brand, data: { kind: 'steel', name: 'Panther', unit: 'pcs', sizes: [{ sizeMm: 10, rodsPerBundle: 12, kgPerRod: 7.4 }] } },
+      { op: 'upsert', entity: 'materialItems', id: bajri, data: { kind: 'material', name: 'Bajri', unit: 'cft', category: 'sand', loadRate: 0.5, unloadRate: 0.4 } },
+    ]);
+    expect(masters.body.rejected).toEqual([]);
+
+    // A return needs its dealer and bags that came back, never taken away.
+    const bad = await push([
+      { op: 'upsert', entity: 'depotAdjustments', id: U(1010), data: { date: DAY, companyId: company, kind: 'returned', gradeBags: { [gradeA]: 5 } } },
+      { op: 'upsert', entity: 'depotAdjustments', id: U(1011), data: { date: DAY, companyId: company, kind: 'returned', partyId: dealer, gradeBags: { [gradeA]: -5 } } },
+      { op: 'upsert', entity: 'materialMoves', id: U(1012), data: { date: DAY, kind: 'returned', lines: [{ itemId: brand, sizeMm: 10, qty: 82 }] } },
+      { op: 'upsert', entity: 'depotDayNotes', id: U(1013), data: { date: DAY, section: 'cement', text: 'no company' } },
+      { op: 'upsert', entity: 'depotDayNotes', id: U(1014), data: { date: DAY, section: 'garden', text: 'x' } },
+    ]);
+    expect(bad.body.rejected.map((r: any) => r.code)).toEqual(Array(5).fill('VALIDATION_FAILED'));
+
+    const rows = await push([
+      { op: 'upsert', entity: 'depotAdjustments', id: cementBack, data: {
+        date: DAY, companyId: company, kind: 'returned', partyId: dealer, customer: 'Mamta Tanwani', address: 'Shubhangan Colony',
+        vehicleNo: 'rj30ga9708', gradeBags: { [gradeA]: 20 }, labourId: javed, labourRate: 3, note: 'Wet bags',
+      } },
+      { op: 'upsert', entity: 'materialMoves', id: steelBack, data: {
+        date: DAY, kind: 'returned', partyId: dealer, customer: 'Rahul Tekwani', labourId: javed,
+        lines: [{ itemId: brand, sizeMm: 10, qty: 82, bundles: 6.83, rate: 30 }],
+      } },
+      { op: 'upsert', entity: 'depotDayNotes', id: note, data: { date: DAY, section: 'cement', companyId: company, text: 'JK truck late' } },
+      { op: 'upsert', entity: 'depotDayNotes', id: steelNote, data: { date: DAY, section: 'steel', companyId: company, text: 'Count Panther tomorrow' } },
+    ]);
+    expect(rows.body.rejected).toEqual([]);
+
+    // A party or gang a return names is in use.
+    expect((await api('DELETE', `/firms/${fid}/labours/${javed}`, undefined, tok)).status).toBe(422);
+
+    // An app from before returns reads them as a correction and an adjust,
+    // and saves them back that way without the return's keys. Both stay
+    // returns, with their dealer; the edited count lands. Likewise an older
+    // app saving the sand item as 'other' leaves it on the Sand/Gitti tab.
+    const old = await push([
+      { op: 'upsert', entity: 'depotAdjustments', id: cementBack, rev: 1, data: {
+        date: DAY, companyId: company, kind: 'correction', gradeBags: { [gradeA]: 25 }, note: 'Wet bags',
+      } },
+      { op: 'upsert', entity: 'materialMoves', id: steelBack, rev: 1, data: {
+        date: DAY, kind: 'adjust', partyId: dealer, customer: 'Rahul Tekwani', lines: [{ itemId: brand, sizeMm: 10, qty: 80 }],
+      } },
+      { op: 'upsert', entity: 'materialItems', id: bajri, data: { kind: 'material', name: 'Bajri', unit: 'cft', category: 'other' } },
+    ]);
+    expect(old.body.rejected).toEqual([]);
+
+    const ch = (await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok)).body.changes;
+    expect(ch.depotAdjustments.find((x: any) => x.id === cementBack)).toEqual(expect.objectContaining({
+      kind: 'returned', partyId: dealer, customer: 'Mamta Tanwani', vehicleNo: 'RJ30GA9708',
+      gradeBags: { [gradeA]: 25 }, labourId: javed, labourRate: 3,
+    }));
+    expect(ch.materialMoves.find((x: any) => x.id === steelBack)).toEqual(expect.objectContaining({ kind: 'returned', partyId: dealer }));
+    expect(ch.materialItems.find((x: any) => x.id === bajri).category).toBe('sand');
+    const notes = Object.fromEntries(ch.depotDayNotes.map((n: any) => [n.id, n]));
+    expect(notes[note]).toEqual(expect.objectContaining({ section: 'cement', companyId: company, text: 'JK truck late', date: DAY }));
+    // Only the cement tab is per company.
+    expect(notes[steelNote].companyId).toBeNull();
+
+    // A note under its derived id comes back even after a tombstone.
+    await push([{ op: 'delete', entity: 'depotDayNotes', id: steelNote, rev: 1 }]);
+    const revived = await push([{ op: 'upsert', entity: 'depotDayNotes', id: steelNote, data: { date: DAY, section: 'steel', text: 'Counted' } }]);
+    expect(revived.body.applied.length).toBe(1);
+    // A stale edit of a live note is a conflict, like any diary edit.
+    const stale = await push([{ op: 'upsert', entity: 'depotDayNotes', id: note, rev: 7, data: { date: DAY, section: 'cement', companyId: company, text: 'x' } }]);
+    expect(stale.body.conflicts[0].server.text).toBe('JK truck late');
+
+    const counts = await api('GET', `/firms/${fid}/sync/counts`, undefined, tok);
+    expect(counts.body.counts.depotDayNotes).toBe(2);
+
+    // The backup carries returns, sand and notes; a replace brings them back.
+    const exp = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(exp.depotAdjustments[0]).toEqual(expect.objectContaining({ kind: 'returned', partyId: dealer, labourRate: 3 }));
+    expect(exp.depotDayNotes.length).toBe(2);
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=replace`, { ...exp, schemaVersion: 6, confirmReplace: true }, tok);
+    expect(restore.status).toBe(200);
+    const back = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(back.depotAdjustments[0]).toEqual(expect.objectContaining({ kind: 'returned', customer: 'Mamta Tanwani', vehicleNo: 'RJ30GA9708' }));
+    expect(back.materialMoves[0].kind).toBe('returned');
+    expect(back.materialItems.find((i: any) => i.id === bajri).category).toBe('sand');
+    expect(back.depotDayNotes.map((n: any) => n.text).sort()).toEqual(['Counted', 'JK truck late']);
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

@@ -315,6 +315,27 @@ a unit) and `material_moves` (receive / dispatch / opening / adjust, lines as
 JSON with the labour units and rate frozen per line). Items are LWW; moves
 reject on rev mismatch; an item in use cannot be deleted.
 
+Migration `0008` (2026-10-14) — returns, sand/gitti, day notes. SQLite can't
+alter a CHECK, so it **rebuilds** `depot_adjustments`, `material_items` and
+`material_moves` (create/copy/drop/rename inside the file's transaction):
+
+- A cement **return** is a `depot_adjustments` row of kind `returned` with
+  `party_id`, `customer`, `address`, `vehicle_no`, `labour_id`, `labour_rate`.
+  Not a dispatch source on purpose: an un-updated app reads an unknown
+  adjustment kind as a correction and still *adds* the bags. The return keys
+  are written only when `partyId` is in the push; `RecordDef.carry` keeps an
+  older app's edit (kind `correction`, no keys) from demoting a return.
+- A steel/material return is a `material_moves` kind `returned` (old apps:
+  `adjust`, stock still goes up); `carry` keeps it `returned` the same way.
+- Item categories `sand` and `gitti` (the Sand/Gitti tab); `itemUpsert`
+  won't let an older app's `other` overwrite them.
+- `depot_day_notes` (`depotDayNotes`, last in `GROUP_ORDER`): one note per
+  (date, section, company-on-cement). The app derives the id, so
+  `RecordDef.revive` lets a tombstoned note be written again instead of
+  conflicting forever. Notes are cleared by saving them empty.
+- Returns count in `depotUsage` for party and labour. Backup import accepts
+  `schemaVersion` 1–6 (6 adds `depotDayNotes`).
+
 Two invariants worth knowing before touching masters:
 
 - `deleteWithCascade` now **refuses** (422) to delete a party, company, grade
@@ -325,9 +346,9 @@ Two invariants worth knowing before touching masters:
   `Date.parse(row.x)` one — go through `sqlToIso`. The box's zone moved to
   IST on 2026-10-10 and the refresh grace window broke that way (`8194ed5`);
   the integration suite runs in the machine's zone and catches it.
-- Backup import accepts `schemaVersion` 1–5 (it was 1–3, which made the app's
-  own "Upload backup" fail from the steel release, schema 4, onward). Export
-  still says 3 so older apps restore it.
+- Backup import accepts `schemaVersion` 1–6 (it was 1–3, which made the app's
+  own "Upload backup" fail from the steel release, schema 4, onward; 6 is the
+  depot day notes). Export still says 3 so older apps restore it.
 
 ---
 

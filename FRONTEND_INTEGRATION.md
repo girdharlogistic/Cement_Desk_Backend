@@ -918,7 +918,8 @@ All grade quantities are objects of `gradeId → bags`. Zero lines are dropped o
 | `depotSettings` | `{ unloadRate, directRate, loadRate }` — ₹ per bag | One per firm. Push `id` = **the firm id** (like `baseline`). In a pull it is a **list of at most one**, not a bare object. Upsert only. |
 | `depotTrucks` | `{ date, companyId, truckNo, ref, received{}, godown{}, short{}, labourId?, unloadRate, note }` | `received` must hold at least one bag. `truckNo` is upper-cased. |
 | `depotDispatches` | `{ date, companyId, source, truckId?, partyId, customer?, address, vehicleNo, gradeBags{}, labourId?, labourRate, note, freightEntryId? }` | `source` is `"godown"` or `"truck"`; a `"truck"` row (a direct delivery) **must** carry `truckId`, a godown row has it cleared. `gradeBags` must hold at least one bag, none negative. `vehicleNo` is upper-cased; `"SELF"` means the party took it themselves. `partyId` is the **dealer**; `customer` is who the dealer sold to (free text, may be empty). |
-| `depotAdjustments` | `{ date, companyId, kind, gradeBags{}, note }` | `kind` is `opening` (positive), `damage` (**negative** bags) or `correction` (either sign). |
+| `depotAdjustments` | `{ date, companyId, kind, gradeBags{}, note, partyId?, customer?, address?, vehicleNo?, labourId?, labourRate? }` | `kind` is `opening` (positive), `damage` (**negative** bags), `correction` (either sign) or `returned` (positive; **needs `partyId`**, the dealer whose customer sent the bags back). The six return keys (migration 0008) are written only when `partyId` is **present** in the data — send them on every kind (empty/`null` on the others), because their absence is how the server recognises an app from before returns. Such an app reads `returned` as a correction and, if it edits one, sends kind `correction` without the keys: the row stays `returned` and keeps its dealer. |
+| `depotDayNotes` | `{ date, section, companyId?, text }` | The note for one day of one diary tab (migration 0008). `section` is `cement`, `steel`, `chemical` or `sandGitti`; `cement` needs `companyId` (a cement page is that company's), the others store `null`. The app derives the `id` (a name-based UUID of server firm id, date, section and company), so every phone meets on one row; **reject on `rev` mismatch** like a diary row. Clear a note by saving `text: ""` — a tombstoned note may be written again under the same id (it is revived, not refused). |
 
 `customer` (migration 0007) is free text, trimmed, at most 160 characters. Like
 `freightEntryId` below, it is only written when the key is **present**, so an older client's
@@ -938,8 +939,8 @@ Deleting a truck **also tombstones its direct deliveries** (`depotDispatches` wi
 `truckId`). The app sends those deletes itself; the server cascade is the backstop.
 
 Godown stock per company and grade, which the client derives:
-`opening + Σ truck.godown − Σ godown dispatches + Σ adjustments`. Direct deliveries never
-touch it.
+`opening + Σ truck.godown − Σ godown dispatches + Σ returns + Σ adjustments`. Direct
+deliveries never touch it. A return is paid the **unloading** rate, frozen in `labourRate`.
 
 ### Steel and material
 
@@ -947,8 +948,8 @@ Two more sync entities, independent of any cement company:
 
 | Entity | Shape (`data`) | Rules |
 |---|---|---|
-| `materialItems` | `{ kind, name, unit, category, sizes[], loadRate, unloadRate, order }` | `kind` is `"steel"` (a brand) or `"material"`. Steel `unit` is `"pcs"` or `"kg"`; `sizes` is `[{ sizeMm, rodsPerBundle, kgPerRod }]` and is cleared for non-steel. `category` is `steel` for a brand, else `bindingWire`/`coverBlock`/`chemical`/`other`. Rates are ₹ per bundle (steel) or per unit. **Last-write-wins.** Delete is refused (`BUSINESS_RULE_VIOLATION`) while any live move uses the item. |
-| `materialMoves` | `{ date, kind, partyId?, customer?, supplier, address, vehicleNo, labourId?, lines[], note }` | `kind` is `receive`, `dispatch` (needs `partyId`, the dealer; `customer` as on a cement dispatch), `opening` or `adjust` (the only kind whose `qty` may be negative). Each line is `{ itemId, sizeMm, qty, bundles, rate }` — `sizeMm` is 0 for an item without sizes; `bundles` is the count the labour rate applies to (bundles for steel, the quantity otherwise), frozen like `rate`. **Reject on `rev` mismatch.** |
+| `materialItems` | `{ kind, name, unit, category, sizes[], loadRate, unloadRate, order }` | `kind` is `"steel"` (a brand) or `"material"`. Steel `unit` is `"pcs"` or `"kg"`; `sizes` is `[{ sizeMm, rodsPerBundle, kgPerRod }]` and is cleared for non-steel. `category` is `steel` for a brand, else `bindingWire`/`coverBlock` (Steel tab), `chemical`/`other` (Chemical tab) or `sand`/`gitti` (Sand/Gitti tab, migration 0008, usually counted in `cft`). An item that is `sand`/`gitti` saved as `other` keeps its category — that is an app from before the tab. Rates are ₹ per bundle (steel) or per unit. **Last-write-wins.** Delete is refused (`BUSINESS_RULE_VIOLATION`) while any live move uses the item. |
+| `materialMoves` | `{ date, kind, partyId?, customer?, supplier, address, vehicleNo, labourId?, lines[], note }` | `kind` is `receive`, `dispatch` (needs `partyId`, the dealer; `customer` as on a cement dispatch), `returned` (came back from the dealer's customer — needs `partyId`, adds to stock, paid the unloading rate; 0008), `opening` or `adjust` (the only kind whose `qty` may be negative). An older app reads `returned` as `adjust` and saves it back that way; the row stays `returned`. Each line is `{ itemId, sizeMm, qty, bundles, rate }` — `sizeMm` is 0 for an item without sizes; `bundles` is the count the labour rate applies to (bundles for steel, the quantity otherwise), frozen like `rate`. **Reject on `rev` mismatch.** |
 
 Steel stock is kept per `(itemId, sizeMm)` in the item's own unit, derived the same way as
 godown cement. Parties and labours used by a move cannot be deleted either.

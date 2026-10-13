@@ -149,6 +149,25 @@ export function mapDepotAdjustment(r: any): any {
     kind: r.kind,
     gradeBags: parseJson(r.grade_bags),
     note: r.note ?? '',
+    // A return's dealer, customer and gang (0008). Empty on the other kinds.
+    partyId: r.party_id ?? null,
+    customer: r.customer ?? '',
+    address: r.address ?? '',
+    vehicleNo: r.vehicle_no ?? '',
+    labourId: r.labour_id ?? null,
+    labourRate: num(r.labour_rate),
+    ...syncMeta(r),
+  };
+}
+
+export function mapDepotDayNote(r: any): any {
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    date: r.date,
+    section: r.section,
+    companyId: r.company_id ?? null,
+    text: r.text ?? '',
     ...syncMeta(r),
   };
 }
@@ -226,6 +245,8 @@ export async function applyDepot(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
         return m.op === 'upsert' ? await itemUpsert(ctx, m) : await itemDelete(ctx, m);
       case 'materialMoves':
         return m.op === 'upsert' ? await recordUpsert(ctx, m, MOVES) : await recordDelete(ctx, m, MOVES);
+      case 'depotDayNotes':
+        return m.op === 'upsert' ? await recordUpsert(ctx, m, DAY_NOTES) : await recordDelete(ctx, m, DAY_NOTES);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);
     }
@@ -263,9 +284,20 @@ async function settingsUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
  * remembered for the other two.
  */
 interface RecordDef {
-  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves';
+  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves' | 'depot_day_notes';
   /** Validated wire data → column values, in a fixed column order. */
   columns(d: any): Record<string, unknown>;
+  /**
+   * Adjusts an update's columns against the row it replaces — for what an
+   * app from before a kind existed cannot know to send. Mutates [cols].
+   */
+  carry?(cols: Record<string, unknown>, existing: any, d: any): void;
+  /**
+   * A tombstoned row may be written again instead of conflicting. Only for
+   * rows whose id the app derives from what they are about (day notes): a
+   * derived id never changes, so a tombstone would refuse it forever.
+   */
+  revive?: boolean;
   map(row: any): any;
   /** Runs inside the delete's transaction, after the row is tombstoned. */
   afterDelete?(ctx: Ctx, id: string): Promise<void>;
@@ -348,21 +380,75 @@ const DISPATCHES: RecordDef = {
 const ADJUSTMENTS: RecordDef = {
   table: 'depot_adjustments',
   columns(d) {
-    const kind = (['opening', 'damage', 'correction'] as const).includes(d.kind) ? d.kind : bad("kind must be 'opening', 'damage' or 'correction'");
-    // A correction goes either way; an opening only adds and a burst bag only
-    // takes away, so those two are held to their sign.
+    const kind = (['opening', 'damage', 'correction', 'returned'] as const).includes(d.kind)
+      ? d.kind
+      : bad("kind must be 'opening', 'damage', 'correction' or 'returned'");
+    // A correction goes either way; an opening and a return only add and a
+    // burst bag only takes away, so those are held to their sign.
     const gradeBags = readGradeBags(d.gradeBags, 'gradeBags', { signed: kind === 'correction' || kind === 'damage' });
     if (kind === 'damage' && Object.values(gradeBags).some((v) => v > 0)) bad('Damaged bags are recorded as a negative number');
+    if (kind === 'returned' && total(gradeBags) <= 0) bad('A return needs the bags that came back');
     if (!isUuid(d.companyId)) bad('companyId must be a UUID');
+    const partyId = readOptionalId(d.partyId, 'partyId');
+    if (kind === 'returned' && !partyId) bad('A return needs the dealer');
     return {
       date: readDate(d.date),
       company_id: d.companyId,
       kind,
       grade_bags: JSON.stringify(gradeBags),
       note: readText(d.note, 500),
+      // Only when sent. An app from before returns edits an opening or a
+      // correction without these keys, and must not blank a return's dealer.
+      ...('partyId' in d
+        ? {
+            party_id: kind === 'returned' ? partyId : null,
+            customer: kind === 'returned' ? readText(d.customer, 160) : '',
+            address: kind === 'returned' ? readText(d.address, 300) : '',
+            vehicle_no: kind === 'returned' ? readText(d.vehicleNo, 40).toUpperCase() : '',
+            labour_id: kind === 'returned' ? readOptionalId(d.labourId, 'labourId') : null,
+            labour_rate: kind === 'returned' ? readRate(d.labourRate, 'labourRate') : 0,
+          }
+        : {}),
     };
   },
+  // An app from before returns reads one as a count correction and, if it
+  // edits it, sends kind 'correction' with none of the return's keys. The row
+  // stays a return; that app's bag count still lands.
+  carry(cols, existing, d) {
+    if (existing.kind === 'returned' && !('partyId' in d)) {
+      cols.kind = 'returned';
+      const bags = parseJson(cols.grade_bags);
+      if (total(bags) <= 0 || Object.values(bags).some((v) => v < 0)) bad('A return needs the bags that came back');
+    }
+  },
   map: mapDepotAdjustment,
+};
+
+const DAY_SECTIONS = ['cement', 'steel', 'chemical', 'sandGitti'] as const;
+
+/**
+ * The note for one day of one tab of the diary — per company on the cement
+ * tab. The app derives the id from (date, section, company), so a second
+ * phone writing the same day's note lands on the same row and is told about
+ * the first, the same as any diary edit. Emptying a note saves it empty.
+ */
+const DAY_NOTES: RecordDef = {
+  table: 'depot_day_notes',
+  columns(d) {
+    const section = (DAY_SECTIONS as readonly string[]).includes(d.section)
+      ? d.section
+      : bad(`section must be one of ${DAY_SECTIONS.join(', ')}`);
+    const companyId = readOptionalId(d.companyId, 'companyId');
+    if (section === 'cement' && !companyId) bad('A cement day note needs the company');
+    return {
+      date: readDate(d.date),
+      section,
+      company_id: section === 'cement' ? companyId : null,
+      text: readText(d.text, 2000),
+    };
+  },
+  revive: true,
+  map: mapDepotDayNote,
 };
 
 const MATERIAL_UNITS = 12;
@@ -376,7 +462,9 @@ const MATERIAL_UNITS = 12;
 const MOVES: RecordDef = {
   table: 'material_moves',
   columns(d) {
-    const kind = (['receive', 'dispatch', 'opening', 'adjust'] as const).includes(d.kind) ? d.kind : bad("kind must be 'receive', 'dispatch', 'opening' or 'adjust'");
+    const kind = (['receive', 'dispatch', 'opening', 'adjust', 'returned'] as const).includes(d.kind)
+      ? d.kind
+      : bad("kind must be 'receive', 'dispatch', 'opening', 'adjust' or 'returned'");
     if (!Array.isArray(d.lines) || d.lines.length === 0) bad('A move needs at least one line');
     if (d.lines.length > 500) bad('Too many lines on one move');
     const lines = (d.lines as any[]).map((l, i) => {
@@ -394,6 +482,7 @@ const MOVES: RecordDef = {
     if (lines.every((l) => Math.abs(l.qty) < 1e-9)) bad('A move needs a quantity on at least one line');
     const partyId = readOptionalId(d.partyId, 'partyId');
     if (kind === 'dispatch' && !partyId) bad('A dispatch needs the dealer');
+    if (kind === 'returned' && !partyId) bad('A return needs the dealer');
     return {
       date: readDate(d.date),
       kind,
@@ -406,6 +495,16 @@ const MOVES: RecordDef = {
       lines: JSON.stringify(lines.filter((l) => Math.abs(l.qty) >= 1e-9)),
       note: readText(d.note, 500),
     };
+  },
+  // An app from before returns reads one as an 'adjust' and saves it back as
+  // one. This app never turns a return into a correction, so that can only
+  // be the older app: the row stays a return.
+  carry(cols, existing) {
+    if (existing.kind === 'returned' && cols.kind === 'adjust') {
+      cols.kind = 'returned';
+      const lines = JSON.parse(String(cols.lines)) as { qty: number }[];
+      if (lines.some((l) => l.qty < 0)) bad('A return cannot take stock away');
+    }
   },
   map: mapMaterialMove,
 };
@@ -423,8 +522,16 @@ async function itemUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
   const kind = d.kind === 'steel' ? 'steel' : 'material';
   const unit = readText(d.unit, MATERIAL_UNITS) || 'pcs';
   if (kind === 'steel' && unit !== 'pcs' && unit !== 'kg') bad("steel is counted in 'pcs' or 'kg'");
-  const categories = ['bindingWire', 'coverBlock', 'chemical', 'other'];
-  const category = kind === 'steel' ? 'steel' : categories.includes(d.category) ? d.category : 'other';
+  const categories = ['bindingWire', 'coverBlock', 'chemical', 'other', 'sand', 'gitti'];
+  let category = kind === 'steel' ? 'steel' : categories.includes(d.category) ? d.category : 'other';
+  // An app from before the Sand/Gitti tab reads those categories as 'other'
+  // and saves them back that way; this app never moves sand to 'other', so
+  // the item keeps its tab.
+  if (category === 'other') {
+    const [prev] = await ctx.c.query('SELECT category FROM material_items WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
+    const was = (prev as any[])[0]?.category;
+    if (was === 'sand' || was === 'gitti') category = was;
+  }
   const sizes = kind !== 'steel' ? [] : (Array.isArray(d.sizes) ? d.sizes : []).map((z: any, i: number) => {
     if (!Number.isInteger(z?.sizeMm) || z.sizeMm <= 0 || z.sizeMm > 100) bad(`sizes[${i}].sizeMm must be a whole number of mm`);
     const rods = z.rodsPerBundle;
@@ -465,22 +572,26 @@ async function itemDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
  */
 async function recordUpsert(ctx: Ctx, m: Mutation, def: RecordDef): Promise<PushOutcome> {
   if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
-  const cols = def.columns(m.data ?? {});
+  const d = m.data ?? {};
+  const cols = def.columns(d);
   const [rows] = await ctx.c.query(`SELECT * FROM ${def.table} WHERE firm_id = ? AND id = ?`, [ctx.firmId, m.id]);
   const existing = (rows as any[])[0];
-  const names = Object.keys(cols);
   if (!existing) {
+    const names = Object.keys(cols);
     await ctx.c.query(
       `INSERT INTO ${def.table} (firm_id, id, ${names.join(', ')}, updated_by) VALUES (?, ?, ${names.map(() => '?').join(', ')}, ?)`,
       [ctx.firmId, m.id, ...Object.values(cols), ctx.userId],
     );
     return applied(m, 1);
   }
-  if (m.rev === undefined || m.rev !== Number(existing.rev) || existing.deleted_at !== null) {
+  const revived = def.revive === true && existing.deleted_at !== null;
+  if (!revived && (m.rev === undefined || m.rev !== Number(existing.rev) || existing.deleted_at !== null)) {
     return conflict(m, def.map(existing));
   }
+  def.carry?.(cols, existing, d);
+  const names = Object.keys(cols);
   await ctx.c.query(
-    `UPDATE ${def.table} SET ${names.map((n) => `${n} = ?`).join(', ')}, rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?`,
+    `UPDATE ${def.table} SET ${names.map((n) => `${n} = ?`).join(', ')}, deleted_at = NULL, rev = rev + 1, updated_by = ? WHERE firm_id = ? AND id = ?`,
     [...Object.values(cols), ctx.userId, ctx.firmId, m.id],
   );
   return applied(m, Number(existing.rev) + 1);
@@ -516,8 +627,9 @@ export async function depotUsage(
   switch (kind) {
     case 'party':
       sql = `SELECT (SELECT COUNT(*) FROM depot_dispatches WHERE ${live} AND party_id = ?)
+                  + (SELECT COUNT(*) FROM depot_adjustments WHERE ${live} AND party_id = ?)
                   + (SELECT COUNT(*) FROM material_moves WHERE ${live} AND party_id = ?) AS n`;
-      params = [firmId, id, firmId, id];
+      params = [firmId, id, firmId, id, firmId, id];
       break;
     case 'materialItem':
       sql = `SELECT COUNT(*) AS n FROM material_moves t WHERE t.firm_id = ? AND t.deleted_at IS NULL
@@ -533,8 +645,9 @@ export async function depotUsage(
     case 'labour':
       sql = `SELECT (SELECT COUNT(*) FROM depot_trucks WHERE ${live} AND labour_id = ?)
                   + (SELECT COUNT(*) FROM depot_dispatches WHERE ${live} AND labour_id = ?)
+                  + (SELECT COUNT(*) FROM depot_adjustments WHERE ${live} AND labour_id = ?)
                   + (SELECT COUNT(*) FROM material_moves WHERE ${live} AND labour_id = ?) AS n`;
-      params = [firmId, id, firmId, id, firmId, id];
+      params = [firmId, id, firmId, id, firmId, id, firmId, id];
       break;
     case 'grade': {
       const inMap = (table: string, col: string) =>

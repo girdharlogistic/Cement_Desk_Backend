@@ -31,6 +31,7 @@ export interface DepotPlan {
   trucks: any[];
   dispatches: any[];
   adjustments: any[];
+  dayNotes: any[];
 }
 
 function rows(body: any, key: string): any[] {
@@ -134,11 +135,34 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
   const adjustments = rows(body, 'depotAdjustments').flatMap((r, i) => {
     const h = head(r, 'depotAdjustments', i);
     if (!h) return [];
-    const kind = ['opening', 'damage', 'correction'].includes(r?.kind) ? r.kind : null;
+    const kind = ['opening', 'damage', 'correction', 'returned'].includes(r?.kind) ? r.kind : null;
     if (!kind) { warnings.push(`depotAdjustments[${i}]: unknown kind — skipped`); return []; }
-    const gradeBags = grades(r?.gradeBags, `depotAdjustments[${i}].gradeBags`, kind !== 'opening');
+    const gradeBags = grades(r?.gradeBags, `depotAdjustments[${i}].gradeBags`, kind === 'damage' || kind === 'correction');
     if (!gradeBags) return [];
-    return [{ ...h, kind, gradeBags }];
+    // A return whose dealer is not in the file is still bags that came back;
+    // it is kept as a count correction rather than lost, and said so.
+    const returned = kind === 'returned' && refs.parties.has(r?.partyId);
+    if (kind === 'returned' && !returned) warnings.push(`depotAdjustments[${i}]: unknown dealer — kept as a correction`);
+    return [{
+      ...h, kind: kind === 'returned' && !returned ? 'correction' : kind, gradeBags,
+      partyId: returned ? r.partyId : null,
+      customer: returned ? String(r?.customer ?? '').trim().slice(0, 160) : '',
+      address: returned ? String(r?.address ?? '').slice(0, 300) : '',
+      vehicleNo: returned ? String(r?.vehicleNo ?? '').toUpperCase().slice(0, 40) : '',
+      labourId: returned ? labour(r?.labourId, `depotAdjustments[${i}]`) : null,
+      labourRate: returned ? rate(r?.labourRate) : 0,
+    }];
+  });
+
+  const dayNotes = rows(body, 'depotDayNotes').flatMap((r, i) => {
+    const date = parseBusinessDate(r?.date);
+    if (!isUuid(r?.id) || !date) { warnings.push(`depotDayNotes[${i}]: needs an id and a date — skipped`); return []; }
+    const section = ['cement', 'steel', 'chemical', 'sandGitti'].includes(r?.section) ? r.section : null;
+    if (!section) { warnings.push(`depotDayNotes[${i}]: unknown section — skipped`); return []; }
+    if (section === 'cement' && !refs.companies.has(r?.companyId)) { warnings.push(`depotDayNotes[${i}]: unknown company — skipped`); return []; }
+    const text = String(r?.text ?? '').trim().slice(0, 2000);
+    if (!text) return [];
+    return [{ id: r.id, date, section, companyId: section === 'cement' ? r.companyId : null, text }];
   });
 
   // ---- steel and material ----
@@ -156,7 +180,7 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     return [{
       id: r.id, kind, name: String(r.name).trim().slice(0, 160),
       unit: kind === 'steel' && unit !== 'kg' ? 'pcs' : unit,
-      category: kind === 'steel' ? 'steel' : ['bindingWire', 'coverBlock', 'chemical', 'other'].includes(r?.category) ? r.category : 'other',
+      category: kind === 'steel' ? 'steel' : ['bindingWire', 'coverBlock', 'chemical', 'other', 'sand', 'gitti'].includes(r?.category) ? r.category : 'other',
       sizes, loadRate: rate(r?.loadRate), unloadRate: rate(r?.unloadRate), order: Math.max(0, Math.trunc(num(r?.order))),
     }];
   });
@@ -164,10 +188,14 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
   const materialMoves = rows(body, 'materialMoves').flatMap((r, i) => {
     const date = parseBusinessDate(r?.date);
     if (!isUuid(r?.id) || !date) { warnings.push(`materialMoves[${i}]: needs an id and a date — skipped`); return []; }
-    const kind = ['receive', 'dispatch', 'opening', 'adjust'].includes(r?.kind) ? r.kind : null;
+    let kind = ['receive', 'dispatch', 'opening', 'adjust', 'returned'].includes(r?.kind) ? r.kind : null;
     if (!kind) { warnings.push(`materialMoves[${i}]: unknown kind — skipped`); return []; }
     const partyId = isUuid(r?.partyId) && refs.parties.has(r.partyId) ? r.partyId : null;
     if (kind === 'dispatch' && !partyId) { warnings.push(`materialMoves[${i}]: unknown dealer — skipped`); return []; }
+    if (kind === 'returned' && !partyId) {
+      warnings.push(`materialMoves[${i}]: unknown dealer — kept as a correction`);
+      kind = 'adjust';
+    }
     const lines = (Array.isArray(r?.lines) ? r.lines : []).flatMap((l: any) =>
       isUuid(l?.itemId) && itemIds.has(l.itemId) && Number.isFinite(l?.qty) && Math.abs(l.qty) > 1e-9
         ? [{ itemId: l.itemId, sizeMm: Number.isInteger(l?.sizeMm) ? l.sizeMm : 0, qty: l.qty, bundles: Math.max(0, num(l?.bundles)), rate: rate(l?.rate) }]
@@ -181,12 +209,13 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     }];
   });
 
-  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves };
+  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves, dayNotes };
 }
 
 /** Tables a replace-mode import tombstones before writing the file's rows. */
 export const DEPOT_REPLACE_TABLES = [
   'labours', 'depot_trucks', 'depot_dispatches', 'depot_adjustments', 'material_items', 'material_moves',
+  'depot_day_notes',
 ];
 
 type Upsert = (c: Q, table: string, cols: string[], vals: unknown[]) => Promise<void>;
@@ -232,12 +261,16 @@ export async function writeDepotRecords(
       [firmId, r.id, r.date, r.companyId, r.source, r.truckId, r.partyId, r.customer, r.address, r.vehicleNo, JSON.stringify(r.gradeBags), r.labourId, r.labourRate, r.note, r.freightEntryId, userId]));
   await write('depotAdjustments', p.adjustments as any, (c, r: any) =>
     upsert(c, 'depot_adjustments',
-      ['firm_id', 'id', 'date', 'company_id', 'kind', 'grade_bags', 'note', 'updated_by'],
-      [firmId, r.id, r.date, r.companyId, r.kind, JSON.stringify(r.gradeBags), r.note, userId]));
+      ['firm_id', 'id', 'date', 'company_id', 'kind', 'grade_bags', 'note', 'party_id', 'customer', 'address', 'vehicle_no', 'labour_id', 'labour_rate', 'updated_by'],
+      [firmId, r.id, r.date, r.companyId, r.kind, JSON.stringify(r.gradeBags), r.note, r.partyId, r.customer, r.address, r.vehicleNo, r.labourId, r.labourRate, userId]));
   await write('materialMoves', p.materialMoves as any, (c, r: any) =>
     upsert(c, 'material_moves',
       ['firm_id', 'id', 'date', 'kind', 'party_id', 'customer', 'supplier', 'address', 'vehicle_no', 'labour_id', 'lines', 'note', 'updated_by'],
       [firmId, r.id, r.date, r.kind, r.partyId, r.customer, r.supplier, r.address, r.vehicleNo, r.labourId, JSON.stringify(r.lines), r.note, userId]));
+  await write('depotDayNotes', p.dayNotes as any, (c, r: any) =>
+    upsert(c, 'depot_day_notes',
+      ['firm_id', 'id', 'date', 'section', 'company_id', 'text', 'updated_by'],
+      [firmId, r.id, r.date, r.section, r.companyId, r.text, userId]));
   return p.settings !== null;
 }
 
@@ -251,6 +284,7 @@ export function exportDepot(
   adjustments: any[],
   items: any[] = [],
   moves: any[] = [],
+  dayNotes: any[] = [],
 ): Record<string, unknown[]> {
   const live = (rs: any[]) => rs.filter((r) => !r.deleted_at);
   const json = (v: unknown) => {
@@ -292,6 +326,8 @@ export function exportDepot(
     })),
     depotAdjustments: live(adjustments).map((r) => ({
       id: r.id, firmId, date: r.date, companyId: r.company_id, kind: r.kind, gradeBags: json(r.grade_bags), note: r.note ?? '',
+      partyId: r.party_id ?? null, customer: r.customer ?? '', address: r.address ?? '', vehicleNo: r.vehicle_no ?? '',
+      labourId: r.labour_id ?? null, labourRate: num(r.labour_rate),
     })),
     materialItems: live(items).map((r) => ({
       id: r.id, firmId, kind: r.kind, name: r.name, unit: r.unit, category: r.category, sizes: list(r.sizes),
@@ -301,6 +337,9 @@ export function exportDepot(
       id: r.id, firmId, date: r.date, kind: r.kind, partyId: r.party_id ?? null, customer: r.customer ?? '', supplier: r.supplier ?? '',
       address: r.address ?? '', vehicleNo: r.vehicle_no ?? '', labourId: r.labour_id ?? null, lines: list(r.lines),
       note: r.note ?? '',
+    })),
+    depotDayNotes: live(dayNotes).filter((r) => String(r.text ?? '').trim()).map((r) => ({
+      id: r.id, firmId, date: r.date, section: r.section, companyId: r.company_id ?? null, text: r.text,
     })),
   };
 }

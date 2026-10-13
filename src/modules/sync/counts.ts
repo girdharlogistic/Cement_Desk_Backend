@@ -35,6 +35,7 @@ const TABLES: Record<string, string> = {
   depotAdjustments: 'depot_adjustments',
   materialItems: 'material_items',
   materialMoves: 'material_moves',
+  depotDayNotes: 'depot_day_notes',
 };
 
 export interface CountsResult {
