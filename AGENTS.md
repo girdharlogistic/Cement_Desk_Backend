@@ -336,6 +336,12 @@ alter a CHECK, so it **rebuilds** `depot_adjustments`, `material_items` and
 - Returns count in `depotUsage` for party and labour. Backup import accepts
   `schemaVersion` 1–6 (6 adds `depotDayNotes`).
 
+Migration `0009` (2026-10-19) — `steel_tests` (`steelTests`, after
+`depotDayNotes` in `GROUP_ORDER`): the app's sariya weight test, one bar size
+and 1–4 measured pieces as a JSON `samples` column. It rides the depot
+module's `RecordDef` machinery (`STEEL_TESTS` in `modules/depot/service.ts`,
+reject on rev mismatch) though it is not diary data. Backup schema 7.
+
 Two invariants worth knowing before touching masters:
 
 - `deleteWithCascade` now **refuses** (422) to delete a party, company, grade
@@ -346,9 +352,10 @@ Two invariants worth knowing before touching masters:
   `Date.parse(row.x)` one — go through `sqlToIso`. The box's zone moved to
   IST on 2026-10-10 and the refresh grace window broke that way (`8194ed5`);
   the integration suite runs in the machine's zone and catches it.
-- Backup import accepts `schemaVersion` 1–6 (it was 1–3, which made the app's
+- Backup import accepts `schemaVersion` 1–7 (it was 1–3, which made the app's
   own "Upload backup" fail from the steel release, schema 4, onward; 6 is the
-  depot day notes). Export still says 3 so older apps restore it.
+  depot day notes, 7 the sariya tests). Export still says 3 so older apps
+  restore it.
 
 ---
 

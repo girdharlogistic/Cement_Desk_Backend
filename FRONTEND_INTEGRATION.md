@@ -954,6 +954,15 @@ Two more sync entities, independent of any cement company:
 Steel stock is kept per `(itemId, sizeMm)` in the item's own unit, derived the same way as
 godown cement. Parties and labours used by a move cannot be deleted either.
 
+### Sariya tests
+
+The counter-side "per piece weight" check (migration 0009). Sync-only, last in the entity
+order.
+
+| Entity | Shape (`data`) | Rules |
+|---|---|---|
+| `steelTests` | `{ date, sizeMm, createdBy, createdFor, note, lengthUnit, samples[] }` | `sizeMm` is the bar size (one per test). `samples` holds **1–4** `{ brand, grade, lengthMm, weightG, rate, rateUnit }`: `grade` is `fe415`/`fe500`/`fe500d`/`fe550`/`fe550d`/`fe600`; `lengthMm` (cut piece, mm, whatever `lengthUnit` it was typed in — `mm`/`cm`/`inch`), `weightG`, `rate` are non-negative; `rateUnit` is `perPiece`/`perKg`/`perQuintal`/`perTonne`. The server stores the measurements; deviation, real diameter and load are the client's arithmetic (IS 1786 nominal mass × length). **Reject on `rev` mismatch.** |
+
 ---
 
 ## 11. Sync protocol

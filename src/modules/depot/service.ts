@@ -160,6 +160,27 @@ export function mapDepotAdjustment(r: any): any {
   };
 }
 
+export function mapSteelTest(r: any): any {
+  let samples: unknown = [];
+  try {
+    samples = JSON.parse(String(r.samples ?? '[]'));
+  } catch {
+    samples = [];
+  }
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    date: r.date,
+    sizeMm: Number(r.size_mm),
+    createdBy: r.created_by ?? '',
+    createdFor: r.created_for ?? '',
+    note: r.note ?? '',
+    lengthUnit: r.length_unit ?? 'mm',
+    samples: Array.isArray(samples) ? samples : [],
+    ...syncMeta(r),
+  };
+}
+
 export function mapDepotDayNote(r: any): any {
   return {
     id: r.id,
@@ -247,6 +268,8 @@ export async function applyDepot(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
         return m.op === 'upsert' ? await recordUpsert(ctx, m, MOVES) : await recordDelete(ctx, m, MOVES);
       case 'depotDayNotes':
         return m.op === 'upsert' ? await recordUpsert(ctx, m, DAY_NOTES) : await recordDelete(ctx, m, DAY_NOTES);
+      case 'steelTests':
+        return m.op === 'upsert' ? await recordUpsert(ctx, m, STEEL_TESTS) : await recordDelete(ctx, m, STEEL_TESTS);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);
     }
@@ -284,7 +307,7 @@ async function settingsUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
  * remembered for the other two.
  */
 interface RecordDef {
-  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves' | 'depot_day_notes';
+  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves' | 'depot_day_notes' | 'steel_tests';
   /** Validated wire data → column values, in a fixed column order. */
   columns(d: any): Record<string, unknown>;
   /**
@@ -449,6 +472,55 @@ const DAY_NOTES: RecordDef = {
   },
   revive: true,
   map: mapDepotDayNote,
+};
+
+const STEEL_GRADES = ['fe415', 'fe500', 'fe500d', 'fe550', 'fe550d', 'fe600'] as const;
+const STEEL_RATE_UNITS = ['perPiece', 'perKg', 'perQuintal', 'perTonne'] as const;
+
+/**
+ * A sariya test: one bar size, one to four measured pieces. The server checks
+ * shape — a real size, sane lengths and weights, a known grade — and keeps
+ * the measurements; every figure the report shows is the app's arithmetic.
+ * Rides the diary's record machinery: reject on rev mismatch, soft delete.
+ */
+const STEEL_TESTS: RecordDef = {
+  table: 'steel_tests',
+  columns(d) {
+    const size = d.sizeMm;
+    if (!Number.isInteger(size) || size < 4 || size > 60) bad('sizeMm must be a bar size in mm');
+    if (!Array.isArray(d.samples) || d.samples.length < 1 || d.samples.length > 4) bad('A test has one to four samples');
+    const samples = (d.samples as any[]).map((s, i) => {
+      if (!s || typeof s !== 'object') bad(`samples[${i}] must be an object`);
+      const measure = (v: unknown, field: string, max: number) => {
+        const n = v === undefined || v === null ? 0 : v;
+        if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > max) bad(`samples[${i}].${field} is out of range`);
+        return n as number;
+      };
+      const grade = (STEEL_GRADES as readonly string[]).includes(s.grade) ? s.grade : bad(`samples[${i}].grade must be one of ${STEEL_GRADES.join(', ')}`);
+      const rateUnit = s.rateUnit === undefined || s.rateUnit === null
+        ? 'perPiece'
+        : (STEEL_RATE_UNITS as readonly string[]).includes(s.rateUnit) ? s.rateUnit : bad(`samples[${i}].rateUnit is not a rate unit`);
+      return {
+        brand: readText(s.brand, 80),
+        grade,
+        lengthMm: measure(s.lengthMm, 'lengthMm', 20_000),
+        weightG: measure(s.weightG, 'weightG', 200_000),
+        rate: measure(s.rate, 'rate', 10_000_000),
+        rateUnit,
+      };
+    });
+    const unit = d.lengthUnit === 'cm' || d.lengthUnit === 'inch' ? d.lengthUnit : 'mm';
+    return {
+      date: readDate(d.date),
+      size_mm: size,
+      created_by: readText(d.createdBy, 120),
+      created_for: readText(d.createdFor, 160),
+      note: readText(d.note, 1000),
+      length_unit: unit,
+      samples: JSON.stringify(samples),
+    };
+  },
+  map: mapSteelTest,
 };
 
 const MATERIAL_UNITS = 12;

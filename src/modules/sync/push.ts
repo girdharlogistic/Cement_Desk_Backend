@@ -53,6 +53,8 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
     // A day's note, per tab of the diary (0008). Names nothing a later group
     // needs, so last.
     'depotDayNotes',
+    // Sariya tests (0009). Name nothing.
+    'steelTests',
   ];
   const byEntity = new Map<string, Mutation[]>();
   for (const m of mutations) {
@@ -101,7 +103,7 @@ async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       case 'claims': return m.op === 'upsert' ? await claimUpsert(ctx, m) : await claimDelete(ctx, m);
       case 'claimCreditNotes': return m.op === 'upsert' ? await creditNoteUpsert(ctx, m) : await creditNoteDelete(ctx, m);
       case 'depotSettings': case 'depotTrucks': case 'depotDispatches': case 'depotAdjustments':
-      case 'materialItems': case 'materialMoves': case 'depotDayNotes':
+      case 'materialItems': case 'materialMoves': case 'depotDayNotes': case 'steelTests':
         return await applyDepot(ctx, m);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);

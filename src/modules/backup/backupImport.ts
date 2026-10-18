@@ -41,12 +41,12 @@ export async function importBackup(
   if (!body || typeof body !== 'object') throw errors.validation('Backup body must be a JSON object');
   const version = Number(body.schemaVersion ?? 0);
   // 4 added the steel estimator, which does not sync and is ignored here; 5
-  // added the depot diary; 6 its day notes. Refusing 4 used to make the
-  // app's own "Upload backup" fail outright from the release that introduced
-  // steel onwards.
-  if (![1, 2, 3, 4, 5, 6].includes(version)) {
+  // added the depot diary; 6 its day notes; 7 the sariya tests. Refusing 4
+  // used to make the app's own "Upload backup" fail outright from the
+  // release that introduced steel onwards.
+  if (![1, 2, 3, 4, 5, 6, 7].includes(version)) {
     throw errors.validation('Unsupported schemaVersion', [
-      { field: 'schemaVersion', code: 'UNSUPPORTED', message: 'schemaVersion must be between 1 and 6' },
+      { field: 'schemaVersion', code: 'UNSUPPORTED', message: 'schemaVersion must be between 1 and 7' },
     ]);
   }
 

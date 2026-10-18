@@ -829,6 +829,58 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(back.depotDayNotes.map((n: any) => n.text).sort()).toEqual(['Counted', 'JK truck late']);
   });
 
+  it('sariya tests: push, validation, conflict, pull, backup', async () => {
+    const f = await api('POST', '/firms', { name: `SteelTest-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(1100), mutations }, tok);
+    const test = U(1101);
+    const sample = (brand: string, grade: string, lengthMm: number, weightG: number, extra: any = {}) =>
+      ({ brand, grade, lengthMm, weightG, ...extra });
+
+    const bad = await push([
+      { op: 'upsert', entity: 'steelTests', id: U(1102), data: { date: DAY, sizeMm: 16, samples: [] } },
+      { op: 'upsert', entity: 'steelTests', id: U(1103), data: { date: DAY, sizeMm: 16, samples: [sample('X', 'fe999', 300, 400)] } },
+      { op: 'upsert', entity: 'steelTests', id: U(1104), data: { date: DAY, sizeMm: 0, samples: [sample('X', 'fe500', 300, 400)] } },
+      { op: 'upsert', entity: 'steelTests', id: U(1105), data: { date: DAY, sizeMm: 16, samples: Array(5).fill(sample('X', 'fe500', 300, 400)) } },
+      { op: 'upsert', entity: 'steelTests', id: U(1106), data: { date: DAY, sizeMm: 16, samples: [sample('X', 'fe500', -1, 400)] } },
+    ]);
+    expect(bad.body.rejected.map((r: any) => r.code)).toEqual(Array(5).fill('VALIDATION_FAILED'));
+
+    const ok = await push([{ op: 'upsert', entity: 'steelTests', id: test, data: {
+      date: DAY, sizeMm: 16, createdBy: 'Gajanand Singh', createdFor: 'Chirag ji', lengthUnit: 'inch',
+      samples: [
+        sample('  Local ', 'fe500', 294.64, 413, { rate: 520, rateUnit: 'perPiece' }),
+        sample('Tata Tiscon', 'fe550d', 284.48, 450, { rate: 6400, rateUnit: 'perQuintal' }),
+      ],
+    } }]);
+    expect(ok.body.rejected).toEqual([]);
+
+    // A stale edit is told, like a diary row.
+    const stale = await push([{ op: 'upsert', entity: 'steelTests', id: test, rev: 5, data: {
+      date: DAY, sizeMm: 16, samples: [sample('Local', 'fe500', 300, 400)],
+    } }]);
+    expect(stale.body.conflicts[0].server.samples.length).toBe(2);
+
+    const ch = (await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok)).body.changes;
+    const t = ch.steelTests.find((x: any) => x.id === test);
+    expect(t).toEqual(expect.objectContaining({ sizeMm: 16, createdBy: 'Gajanand Singh', createdFor: 'Chirag ji', lengthUnit: 'inch', date: DAY }));
+    expect(t.samples[0]).toEqual({ brand: 'Local', grade: 'fe500', lengthMm: 294.64, weightG: 413, rate: 520, rateUnit: 'perPiece' });
+    expect(t.samples[1].grade).toBe('fe550d');
+    expect((await api('GET', `/firms/${fid}/sync/counts`, undefined, tok)).body.counts.steelTests).toBe(1);
+
+    const exp = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(exp.steelTests[0].samples[1].brand).toBe('Tata Tiscon');
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=replace`, { ...exp, schemaVersion: 7, confirmReplace: true }, tok);
+    expect(restore.status).toBe(200);
+    const back = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(back.steelTests[0]).toEqual(expect.objectContaining({ sizeMm: 16, createdFor: 'Chirag ji', lengthUnit: 'inch' }));
+    expect(back.steelTests[0].samples.map((s: any) => s.weightG)).toEqual([413, 450]);
+
+    const del = await push([{ op: 'delete', entity: 'steelTests', id: test, rev: 1 }]);
+    expect(del.body.conflicts.length + del.body.applied.length).toBe(1);
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

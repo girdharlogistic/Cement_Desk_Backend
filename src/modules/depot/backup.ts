@@ -32,6 +32,7 @@ export interface DepotPlan {
   dispatches: any[];
   adjustments: any[];
   dayNotes: any[];
+  steelTests: any[];
 }
 
 function rows(body: any, key: string): any[] {
@@ -209,13 +210,37 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     }];
   });
 
-  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves, dayNotes };
+  // ---- sariya tests ----
+  const steelGrades = ['fe415', 'fe500', 'fe500d', 'fe550', 'fe550d', 'fe600'];
+  const units = ['perPiece', 'perKg', 'perQuintal', 'perTonne'];
+  const steelTests = rows(body, 'steelTests').flatMap((r, i) => {
+    const date = parseBusinessDate(r?.date);
+    if (!isUuid(r?.id) || !date) { warnings.push(`steelTests[${i}]: needs an id and a date — skipped`); return []; }
+    const size = Number.isInteger(r?.sizeMm) && r.sizeMm >= 4 && r.sizeMm <= 60 ? r.sizeMm : null;
+    if (!size) { warnings.push(`steelTests[${i}]: unknown bar size — skipped`); return []; }
+    const samples = (Array.isArray(r?.samples) ? r.samples : []).slice(0, 4).map((s: any) => ({
+      brand: String(s?.brand ?? '').trim().slice(0, 80),
+      grade: steelGrades.includes(s?.grade) ? s.grade : 'fe500',
+      lengthMm: Math.max(0, num(s?.lengthMm)),
+      weightG: Math.max(0, num(s?.weightG)),
+      rate: Math.max(0, num(s?.rate)),
+      rateUnit: units.includes(s?.rateUnit) ? s.rateUnit : 'perPiece',
+    }));
+    if (!samples.length) { warnings.push(`steelTests[${i}]: no samples — skipped`); return []; }
+    return [{
+      id: r.id, date, sizeMm: size, createdBy: String(r?.createdBy ?? '').slice(0, 120),
+      createdFor: String(r?.createdFor ?? '').slice(0, 160), note: String(r?.note ?? '').slice(0, 1000),
+      lengthUnit: r?.lengthUnit === 'cm' || r?.lengthUnit === 'inch' ? r.lengthUnit : 'mm', samples,
+    }];
+  });
+
+  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves, dayNotes, steelTests };
 }
 
 /** Tables a replace-mode import tombstones before writing the file's rows. */
 export const DEPOT_REPLACE_TABLES = [
   'labours', 'depot_trucks', 'depot_dispatches', 'depot_adjustments', 'material_items', 'material_moves',
-  'depot_day_notes',
+  'depot_day_notes', 'steel_tests',
 ];
 
 type Upsert = (c: Q, table: string, cols: string[], vals: unknown[]) => Promise<void>;
@@ -271,6 +296,10 @@ export async function writeDepotRecords(
     upsert(c, 'depot_day_notes',
       ['firm_id', 'id', 'date', 'section', 'company_id', 'text', 'updated_by'],
       [firmId, r.id, r.date, r.section, r.companyId, r.text, userId]));
+  await write('steelTests', p.steelTests as any, (c, r: any) =>
+    upsert(c, 'steel_tests',
+      ['firm_id', 'id', 'date', 'size_mm', 'created_by', 'created_for', 'note', 'length_unit', 'samples', 'updated_by'],
+      [firmId, r.id, r.date, r.sizeMm, r.createdBy, r.createdFor, r.note, r.lengthUnit, JSON.stringify(r.samples), userId]));
   return p.settings !== null;
 }
 
@@ -285,6 +314,7 @@ export function exportDepot(
   items: any[] = [],
   moves: any[] = [],
   dayNotes: any[] = [],
+  steelTests: any[] = [],
 ): Record<string, unknown[]> {
   const live = (rs: any[]) => rs.filter((r) => !r.deleted_at);
   const json = (v: unknown) => {
@@ -340,6 +370,10 @@ export function exportDepot(
     })),
     depotDayNotes: live(dayNotes).filter((r) => String(r.text ?? '').trim()).map((r) => ({
       id: r.id, firmId, date: r.date, section: r.section, companyId: r.company_id ?? null, text: r.text,
+    })),
+    steelTests: live(steelTests).map((r) => ({
+      id: r.id, firmId, date: r.date, sizeMm: Number(r.size_mm), createdBy: r.created_by ?? '',
+      createdFor: r.created_for ?? '', note: r.note ?? '', lengthUnit: r.length_unit ?? 'mm', samples: list(r.samples),
     })),
   };
 }
