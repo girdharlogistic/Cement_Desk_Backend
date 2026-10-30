@@ -37,6 +37,8 @@ const TABLES: Record<string, string> = {
   materialMoves: 'material_moves',
   depotDayNotes: 'depot_day_notes',
   steelTests: 'steel_tests',
+  steelBrands: 'steel_brands',
+  steelEstimates: 'steel_estimates',
 };
 
 export interface CountsResult {

@@ -342,6 +342,20 @@ and 1–4 measured pieces as a JSON `samples` column. It rides the depot
 module's `RecordDef` machinery (`STEEL_TESTS` in `modules/depot/service.ts`,
 reject on rev mismatch) though it is not diary data. Backup schema 7.
 
+Migration `0010` (2026-10-30) — the steel estimator, which until app 1.16
+lived on the device alone: `steel_brands` (`steelBrands`, last-write-wins
+like a master; the size list as JSON with the rate always per kg) and
+`steel_estimates` (`steelEstimates`, `STEEL_ESTIMATES` `RecordDef`, reject on
+rev mismatch; rows, comparison ids and discounts as JSON). Both after
+`steelTests` in `GROUP_ORDER`. `rate_updated_at` and `written_at` are
+**instants** kept as sent (`readInstant`), not business dates. No foreign
+key from an estimate to its brand and no in-use guard on a brand delete —
+an estimate carries its own copy of everything it took from the brand.
+Backup import reads the app's schema-4 keys (`steelBrands`, `steelEstimates`,
+the estimate's instant as `date`, legacy enum ordinals); export writes the
+same. Deploy before an app that has 1.16: an older server answers
+`UNKNOWN_ENTITY` and the app refuses the save.
+
 Two invariants worth knowing before touching masters:
 
 - `deleteWithCascade` now **refuses** (422) to delete a party, company, grade

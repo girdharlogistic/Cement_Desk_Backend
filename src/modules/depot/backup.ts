@@ -33,6 +33,8 @@ export interface DepotPlan {
   adjustments: any[];
   dayNotes: any[];
   steelTests: any[];
+  steelBrands: any[];
+  steelEstimates: any[];
 }
 
 function rows(body: any, key: string): any[] {
@@ -234,13 +236,74 @@ export function planDepot(body: any, refs: DepotRefs, warnings: string[]): Depot
     }];
   });
 
-  return { labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves, dayNotes, steelTests };
+  // ---- steel estimator ----
+  // In the app's backup since schema 4, stored here since 0010. Brand and
+  // estimate times are instants; an older app writes them without a zone, as
+  // device-local time, and they are kept exactly as written. Ordinals are the
+  // legacy enum indexes the app's own reader still accepts.
+  const instant = (v: unknown) =>
+    typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v) && !Number.isNaN(Date.parse(v)) ? v : new Date().toISOString();
+  const either = (v: unknown, second: string, legacy: number, first: string) => (v === second || v === legacy ? second : first);
+  const barSize = (v: unknown) => (Number.isInteger(v) && (v as number) >= 4 && (v as number) <= 60 ? (v as number) : null);
+  const amount = (v: unknown, max = 10_000_000) => {
+    const n = num(v);
+    return n >= 0 && n <= max ? n : 0;
+  };
+  const whole = (v: unknown) => Math.min(10_000, Math.max(0, Math.trunc(num(v))));
+  const steelBrands = rows(body, 'steelBrands').flatMap((r, i) => {
+    const name = String(r?.name ?? '').trim().slice(0, 160);
+    if (!isUuid(r?.id) || !name) { warnings.push(`steelBrands[${i}]: needs an id and a name — skipped`); return []; }
+    const seen = new Set<number>();
+    const sizes = (Array.isArray(r?.sizes) ? r.sizes : []).slice(0, 20).flatMap((z: any) => {
+      const sizeMm = barSize(z?.sizeMm);
+      if (sizeMm === null || seen.has(sizeMm)) return [];
+      seen.add(sizeMm);
+      return [{ sizeMm, lengthsPerBundle: whole(z?.lengthsPerBundle), kgPerRod: amount(z?.kgPerRod, 1000), ratePerKg: rate(z?.ratePerKg) }];
+    });
+    const bar = num(r?.barLengthM);
+    return [{
+      id: r.id, name, mode: either(r?.mode, 'perKg', 1, 'perPiece'), rateUnit: either(r?.rateUnit, 'perKg', 1, 'perPiece'),
+      barLengthM: bar > 0 && bar <= 30 ? bar : 12, sizes, rateUpdatedAt: instant(r?.rateUpdatedAt),
+      order: Number.isInteger(r?.order) && r.order >= 0 ? Math.min(r.order, 1_000_000) : 0,
+    }];
+  });
+  const steelEstimates = rows(body, 'steelEstimates').flatMap((r, i) => {
+    if (!isUuid(r?.id)) { warnings.push(`steelEstimates[${i}]: needs an id — skipped`); return []; }
+    const lines = (Array.isArray(r?.lines) ? r.lines : []).slice(0, 50).flatMap((l: any) => {
+      const sizeMm = barSize(l?.sizeMm);
+      return sizeMm === null ? [] : [{
+        sizeMm, pieces: amount(l?.pieces), kg: amount(l?.kg), rate: rate(l?.rate), kgPerRod: amount(l?.kgPerRod, 1000),
+        lengthsPerBundle: whole(l?.lengthsPerBundle),
+      }];
+    });
+    const discounts = r?.compareDiscounts && typeof r.compareDiscounts === 'object' && !Array.isArray(r.compareDiscounts) ? r.compareDiscounts : {};
+    return [{
+      id: r.id, brandId: isUuid(r?.brandId) ? r.brandId : null, brandName: String(r?.brandName ?? '').trim().slice(0, 160),
+      mode: either(r?.mode, 'perKg', 1, 'perPiece'), customer: String(r?.customer ?? '').trim().slice(0, 160),
+      writtenAt: instant(r?.date), lines,
+      bindingWireKg: amount(r?.bindingWireKg), bindingWireRate: amount(r?.bindingWireRate),
+      coverBlockQty: amount(r?.coverBlockQty), coverBlockRate: amount(r?.coverBlockRate),
+      freightMode: either(r?.freightMode, 'perTonne', 1, 'flat'), freightValue: amount(r?.freightValue),
+      loadingMode: either(r?.loadingMode, 'perBundle', 1, 'flat'), loadingCharges: amount(r?.loadingCharges),
+      discountPct: amount(r?.discountPct, 100),
+      discountScope: either(r?.discountScope, 'total', 1, either(r?.discountScope, 'steelAndMaterials', 2, 'steelOnly')),
+      gstPct: amount(r?.gstPct, 100),
+      compareBrandIds: (Array.isArray(r?.compareBrandIds) ? r.compareBrandIds : []).filter((x: unknown) => isUuid(x)).slice(0, 10),
+      compareBasis: r?.compareBasis === 'kg' ? 'kg' : 'pieces',
+      compareDiscounts: Object.fromEntries(Object.entries(discounts).filter(([k]) => isUuid(k)).slice(0, 20).map(([k, v]) => [k, amount(v, 100)])),
+    }];
+  });
+
+  return {
+    labours, settings, trucks, dispatches, adjustments, materialItems, materialMoves, dayNotes, steelTests,
+    steelBrands, steelEstimates,
+  };
 }
 
 /** Tables a replace-mode import tombstones before writing the file's rows. */
 export const DEPOT_REPLACE_TABLES = [
   'labours', 'depot_trucks', 'depot_dispatches', 'depot_adjustments', 'material_items', 'material_moves',
-  'depot_day_notes', 'steel_tests',
+  'depot_day_notes', 'steel_tests', 'steel_brands', 'steel_estimates',
 ];
 
 type Upsert = (c: Q, table: string, cols: string[], vals: unknown[]) => Promise<void>;
@@ -300,6 +363,18 @@ export async function writeDepotRecords(
     upsert(c, 'steel_tests',
       ['firm_id', 'id', 'date', 'size_mm', 'created_by', 'created_for', 'note', 'length_unit', 'samples', 'updated_by'],
       [firmId, r.id, r.date, r.sizeMm, r.createdBy, r.createdFor, r.note, r.lengthUnit, JSON.stringify(r.samples), userId]));
+  await write('steelBrands', p.steelBrands as any, (c, r: any) =>
+    upsert(c, 'steel_brands',
+      ['firm_id', 'id', 'name', 'mode', 'rate_unit', 'bar_length_m', 'sizes', 'rate_updated_at', 'sort_order', 'updated_by'],
+      [firmId, r.id, r.name, r.mode, r.rateUnit, r.barLengthM, JSON.stringify(r.sizes), r.rateUpdatedAt, r.order, userId]));
+  await write('steelEstimates', p.steelEstimates as any, (c, r: any) =>
+    upsert(c, 'steel_estimates',
+      ['firm_id', 'id', 'brand_id', 'brand_name', 'mode', 'customer', 'written_at', 'lines', 'binding_wire_kg', 'binding_wire_rate',
+        'cover_block_qty', 'cover_block_rate', 'freight_mode', 'freight_value', 'loading_mode', 'loading_charges', 'discount_pct',
+        'discount_scope', 'gst_pct', 'compare_brand_ids', 'compare_basis', 'compare_discounts', 'updated_by'],
+      [firmId, r.id, r.brandId, r.brandName, r.mode, r.customer, r.writtenAt, JSON.stringify(r.lines), r.bindingWireKg, r.bindingWireRate,
+        r.coverBlockQty, r.coverBlockRate, r.freightMode, r.freightValue, r.loadingMode, r.loadingCharges, r.discountPct,
+        r.discountScope, r.gstPct, JSON.stringify(r.compareBrandIds), r.compareBasis, JSON.stringify(r.compareDiscounts), userId]));
   return p.settings !== null;
 }
 
@@ -315,6 +390,8 @@ export function exportDepot(
   moves: any[] = [],
   dayNotes: any[] = [],
   steelTests: any[] = [],
+  steelBrands: any[] = [],
+  steelEstimates: any[] = [],
 ): Record<string, unknown[]> {
   const live = (rs: any[]) => rs.filter((r) => !r.deleted_at);
   const json = (v: unknown) => {
@@ -374,6 +451,21 @@ export function exportDepot(
     steelTests: live(steelTests).map((r) => ({
       id: r.id, firmId, date: r.date, sizeMm: Number(r.size_mm), createdBy: r.created_by ?? '',
       createdFor: r.created_for ?? '', note: r.note ?? '', lengthUnit: r.length_unit ?? 'mm', samples: list(r.samples),
+    })),
+    // The app's own backup keys: an estimate's instant is `date` there.
+    steelBrands: live(steelBrands).map((r) => ({
+      id: r.id, firmId, name: r.name, mode: r.mode, rateUnit: r.rate_unit, barLengthM: num(r.bar_length_m),
+      sizes: list(r.sizes), rateUpdatedAt: r.rate_updated_at, order: Number(r.sort_order),
+    })),
+    steelEstimates: live(steelEstimates).map((r) => ({
+      id: r.id, firmId, brandId: r.brand_id ?? '', brandName: r.brand_name ?? '', mode: r.mode, customer: r.customer ?? '',
+      date: r.written_at, lines: list(r.lines),
+      bindingWireKg: num(r.binding_wire_kg), bindingWireRate: num(r.binding_wire_rate),
+      coverBlockQty: num(r.cover_block_qty), coverBlockRate: num(r.cover_block_rate),
+      freightMode: r.freight_mode, freightValue: num(r.freight_value),
+      loadingMode: r.loading_mode, loadingCharges: num(r.loading_charges),
+      discountPct: num(r.discount_pct), discountScope: r.discount_scope, gstPct: num(r.gst_pct),
+      compareBrandIds: list(r.compare_brand_ids), compareBasis: r.compare_basis, compareDiscounts: json(r.compare_discounts),
     })),
   };
 }

@@ -181,6 +181,58 @@ export function mapSteelTest(r: any): any {
   };
 }
 
+function jsonOf<T>(v: unknown, fallback: T, ok: (o: unknown) => boolean): T {
+  try {
+    const o = JSON.parse(String(v ?? ''));
+    return ok(o) ? (o as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function mapSteelBrand(r: any): any {
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    name: r.name,
+    mode: r.mode,
+    rateUnit: r.rate_unit,
+    barLengthM: num(r.bar_length_m),
+    sizes: jsonOf(r.sizes, [], Array.isArray),
+    rateUpdatedAt: r.rate_updated_at,
+    order: Number(r.sort_order),
+    ...syncMeta(r),
+  };
+}
+
+export function mapSteelEstimate(r: any): any {
+  return {
+    id: r.id,
+    firmId: r.firm_id,
+    brandId: r.brand_id ?? null,
+    brandName: r.brand_name ?? '',
+    mode: r.mode,
+    customer: r.customer ?? '',
+    writtenAt: r.written_at,
+    lines: jsonOf(r.lines, [], Array.isArray),
+    bindingWireKg: num(r.binding_wire_kg),
+    bindingWireRate: num(r.binding_wire_rate),
+    coverBlockQty: num(r.cover_block_qty),
+    coverBlockRate: num(r.cover_block_rate),
+    freightMode: r.freight_mode,
+    freightValue: num(r.freight_value),
+    loadingMode: r.loading_mode,
+    loadingCharges: num(r.loading_charges),
+    discountPct: num(r.discount_pct),
+    discountScope: r.discount_scope,
+    gstPct: num(r.gst_pct),
+    compareBrandIds: jsonOf(r.compare_brand_ids, [], Array.isArray),
+    compareBasis: r.compare_basis,
+    compareDiscounts: jsonOf(r.compare_discounts, {}, (o) => !!o && typeof o === 'object' && !Array.isArray(o)),
+    ...syncMeta(r),
+  };
+}
+
 export function mapDepotDayNote(r: any): any {
   return {
     id: r.id,
@@ -270,6 +322,10 @@ export async function applyDepot(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
         return m.op === 'upsert' ? await recordUpsert(ctx, m, DAY_NOTES) : await recordDelete(ctx, m, DAY_NOTES);
       case 'steelTests':
         return m.op === 'upsert' ? await recordUpsert(ctx, m, STEEL_TESTS) : await recordDelete(ctx, m, STEEL_TESTS);
+      case 'steelBrands':
+        return m.op === 'upsert' ? await steelBrandUpsert(ctx, m) : await steelBrandDelete(ctx, m);
+      case 'steelEstimates':
+        return m.op === 'upsert' ? await recordUpsert(ctx, m, STEEL_ESTIMATES) : await recordDelete(ctx, m, STEEL_ESTIMATES);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);
     }
@@ -307,7 +363,8 @@ async function settingsUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
  * remembered for the other two.
  */
 interface RecordDef {
-  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves' | 'depot_day_notes' | 'steel_tests';
+  table: 'depot_trucks' | 'depot_dispatches' | 'depot_adjustments' | 'material_moves' | 'depot_day_notes' | 'steel_tests'
+    | 'steel_estimates';
   /** Validated wire data → column values, in a fixed column order. */
   columns(d: any): Record<string, unknown>;
   /**
@@ -521,6 +578,163 @@ const STEEL_TESTS: RecordDef = {
     };
   },
   map: mapSteelTest,
+};
+
+// ---------------------------------------------------------- steel estimator
+
+const STEEL_MODES = ['perPiece', 'perKg'] as const;
+const MAX_AMOUNT = 10_000_000;
+
+/** An ISO-8601 date and time, kept as sent (see 0010 for why not a day). */
+function readInstant(v: unknown, field: string): string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?$/.test(v)
+      || Number.isNaN(Date.parse(v))) {
+    bad(`${field} must be an ISO-8601 date and time`);
+  }
+  return v;
+}
+
+/** One of [values]; [fallback] when the key is absent, refused when unknown. */
+function readEnum<T extends string>(v: unknown, field: string, values: readonly T[], fallback: T): T {
+  if (v === undefined || v === null) return fallback;
+  return (values as readonly unknown[]).includes(v) ? (v as T) : bad(`${field} must be one of ${values.join(', ')}`);
+}
+
+function readAmount(v: unknown, field: string, max = MAX_AMOUNT): number {
+  if (v === undefined || v === null) return 0;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > max) bad(`${field} is out of range`);
+  return v;
+}
+
+function readBarSize(v: unknown, field: string): number {
+  if (!Number.isInteger(v) || (v as number) < 4 || (v as number) > 60) bad(`${field} must be a bar size in mm`);
+  return v as number;
+}
+
+function readCount(v: unknown, field: string): number {
+  const n = v === undefined || v === null ? 0 : v;
+  if (!Number.isInteger(n) || (n as number) < 0 || (n as number) > 10_000) bad(`${field} must be a whole number`);
+  return n as number;
+}
+
+/**
+ * A steel brand is a master: last write wins, like material items. Its size
+ * list is checked for shape because every estimate does arithmetic with it —
+ * one entry per bar size, the rate stored per kg whatever unit it was typed
+ * in.
+ */
+async function steelBrandUpsert(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
+  if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
+  const d = m.data ?? {};
+  const name = readText(d.name, 160);
+  if (!name) bad('name is required');
+  const mode = readEnum(d.mode, 'mode', STEEL_MODES, 'perPiece');
+  const rateUnit = readEnum(d.rateUnit, 'rateUnit', STEEL_MODES, 'perPiece');
+  const barLength = d.barLengthM === undefined || d.barLengthM === null ? 12 : d.barLengthM;
+  if (typeof barLength !== 'number' || !Number.isFinite(barLength) || barLength <= 0 || barLength > 30) bad('barLengthM must be a rod length in metres');
+  if (d.sizes !== undefined && d.sizes !== null && !Array.isArray(d.sizes)) bad('sizes must be a list');
+  const raw: any[] = Array.isArray(d.sizes) ? d.sizes : [];
+  if (raw.length > 20) bad('Too many sizes on one brand');
+  const seen = new Set<number>();
+  const sizes = raw.map((s, i) => {
+    if (!s || typeof s !== 'object') bad(`sizes[${i}] must be an object`);
+    const sizeMm = readBarSize(s.sizeMm, `sizes[${i}].sizeMm`);
+    if (seen.has(sizeMm)) bad(`sizes[${i}]: ${sizeMm} mm is listed twice`);
+    seen.add(sizeMm);
+    return {
+      sizeMm,
+      lengthsPerBundle: readCount(s.lengthsPerBundle, `sizes[${i}].lengthsPerBundle`),
+      kgPerRod: readAmount(s.kgPerRod, `sizes[${i}].kgPerRod`, 1000),
+      ratePerKg: readAmount(s.ratePerKg, `sizes[${i}].ratePerKg`, MAX_RATE),
+    };
+  });
+  const order = Number.isInteger(d.order) && d.order >= 0 && d.order <= 1_000_000 ? d.order : 0;
+  await ctx.c.query(
+    `INSERT INTO steel_brands (firm_id, id, name, mode, rate_unit, bar_length_m, sizes, rate_updated_at, sort_order, updated_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (firm_id, id) DO UPDATE SET
+       name = excluded.name, mode = excluded.mode, rate_unit = excluded.rate_unit, bar_length_m = excluded.bar_length_m,
+       sizes = excluded.sizes, rate_updated_at = excluded.rate_updated_at, sort_order = excluded.sort_order,
+       deleted_at = NULL, rev = rev + 1, updated_by = excluded.updated_by`,
+    [ctx.firmId, m.id, name, mode, rateUnit, barLength, JSON.stringify(sizes),
+     readInstant(d.rateUpdatedAt, 'rateUpdatedAt'), order, ctx.userId],
+  );
+  const [rows] = await ctx.c.query('SELECT rev FROM steel_brands WHERE firm_id = ? AND id = ?', [ctx.firmId, m.id]);
+  return applied(m, Number((rows as any[])[0].rev));
+}
+
+/**
+ * No in-use guard, unlike a material item: an estimate carries its own frozen
+ * copy of every figure it took from the brand, so the mill can go and every
+ * estimate written against it still reads the same.
+ */
+async function steelBrandDelete(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
+  if (!isUuid(m.id)) return reject(m, 'BAD_ID', 'id must be a UUID');
+  await softDeleteRow(ctx.c, 'steel_brands', ctx.firmId, m.id, ctx.userId);
+  return applied(m, (m.rev ?? 0) + 1);
+}
+
+/**
+ * A steel estimate: the rows as quoted plus the charges that ride along. The
+ * server checks shape — real sizes, finite non-negative figures, known modes —
+ * and stores; every total the customer sees is the app's arithmetic. Rides
+ * the diary's record machinery: reject on rev mismatch, soft delete.
+ */
+const STEEL_ESTIMATES: RecordDef = {
+  table: 'steel_estimates',
+  columns(d) {
+    if (d.lines !== undefined && d.lines !== null && !Array.isArray(d.lines)) bad('lines must be a list');
+    const raw: any[] = Array.isArray(d.lines) ? d.lines : [];
+    if (raw.length > 50) bad('Too many rows on one estimate');
+    const lines = raw.map((l, i) => {
+      if (!l || typeof l !== 'object') bad(`lines[${i}] must be an object`);
+      return {
+        sizeMm: readBarSize(l.sizeMm, `lines[${i}].sizeMm`),
+        pieces: readAmount(l.pieces, `lines[${i}].pieces`, MAX_BAGS),
+        kg: readAmount(l.kg, `lines[${i}].kg`, MAX_BAGS),
+        rate: readAmount(l.rate, `lines[${i}].rate`, MAX_RATE),
+        kgPerRod: readAmount(l.kgPerRod, `lines[${i}].kgPerRod`, 1000),
+        lengthsPerBundle: readCount(l.lengthsPerBundle, `lines[${i}].lengthsPerBundle`),
+      };
+    });
+    if (d.compareBrandIds !== undefined && d.compareBrandIds !== null && !Array.isArray(d.compareBrandIds)) bad('compareBrandIds must be a list');
+    const compared: unknown[] = Array.isArray(d.compareBrandIds) ? d.compareBrandIds : [];
+    if (compared.length > 10) bad('Too many brands compared');
+    compared.forEach((id, i) => { if (!isUuid(id)) bad(`compareBrandIds[${i}] must be a UUID`); });
+    const discounts: Record<string, number> = {};
+    if (d.compareDiscounts !== undefined && d.compareDiscounts !== null) {
+      if (typeof d.compareDiscounts !== 'object' || Array.isArray(d.compareDiscounts)) bad('compareDiscounts must be an object of brandId → percent');
+      const entries = Object.entries(d.compareDiscounts as Record<string, unknown>);
+      if (entries.length > 20) bad('Too many compare discounts');
+      for (const [brandId, pct] of entries) {
+        if (!isUuid(brandId)) bad(`compareDiscounts: '${brandId}' is not a brand id`);
+        discounts[brandId] = readAmount(pct, `compareDiscounts.${brandId}`, 100);
+      }
+    }
+    return {
+      brand_id: readOptionalId(d.brandId, 'brandId'),
+      brand_name: readText(d.brandName, 160),
+      mode: readEnum(d.mode, 'mode', STEEL_MODES, 'perPiece'),
+      customer: readText(d.customer, 160),
+      written_at: readInstant(d.writtenAt, 'writtenAt'),
+      lines: JSON.stringify(lines),
+      binding_wire_kg: readAmount(d.bindingWireKg, 'bindingWireKg'),
+      binding_wire_rate: readAmount(d.bindingWireRate, 'bindingWireRate'),
+      cover_block_qty: readAmount(d.coverBlockQty, 'coverBlockQty'),
+      cover_block_rate: readAmount(d.coverBlockRate, 'coverBlockRate'),
+      freight_mode: readEnum(d.freightMode, 'freightMode', ['flat', 'perTonne'] as const, 'flat'),
+      freight_value: readAmount(d.freightValue, 'freightValue'),
+      loading_mode: readEnum(d.loadingMode, 'loadingMode', ['flat', 'perBundle'] as const, 'flat'),
+      loading_charges: readAmount(d.loadingCharges, 'loadingCharges'),
+      discount_pct: readAmount(d.discountPct, 'discountPct', 100),
+      discount_scope: readEnum(d.discountScope, 'discountScope', ['steelOnly', 'steelAndMaterials', 'total'] as const, 'steelOnly'),
+      gst_pct: readAmount(d.gstPct, 'gstPct', 100),
+      compare_brand_ids: JSON.stringify(compared),
+      compare_basis: readEnum(d.compareBasis, 'compareBasis', ['pieces', 'kg'] as const, 'pieces'),
+      compare_discounts: JSON.stringify(discounts),
+    };
+  },
+  map: mapSteelEstimate,
 };
 
 const MATERIAL_UNITS = 12;

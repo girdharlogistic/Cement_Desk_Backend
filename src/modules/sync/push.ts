@@ -55,6 +55,10 @@ export async function push(firmId: string, userId: string, mutations: Mutation[]
     'depotDayNotes',
     // Sariya tests (0009). Name nothing.
     'steelTests',
+    // The steel estimator (0010): brands, then the estimates written against
+    // them. Nothing is a foreign key — an estimate outlives its brand — but
+    // the order is the natural one and costs nothing.
+    'steelBrands', 'steelEstimates',
   ];
   const byEntity = new Map<string, Mutation[]>();
   for (const m of mutations) {
@@ -104,6 +108,7 @@ async function applyOne(ctx: Ctx, m: Mutation): Promise<PushOutcome> {
       case 'claimCreditNotes': return m.op === 'upsert' ? await creditNoteUpsert(ctx, m) : await creditNoteDelete(ctx, m);
       case 'depotSettings': case 'depotTrucks': case 'depotDispatches': case 'depotAdjustments':
       case 'materialItems': case 'materialMoves': case 'depotDayNotes': case 'steelTests':
+      case 'steelBrands': case 'steelEstimates':
         return await applyDepot(ctx, m);
       default:
         return reject(m, 'UNKNOWN_ENTITY', `Unknown entity '${m.entity}'`);

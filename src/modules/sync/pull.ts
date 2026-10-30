@@ -10,7 +10,7 @@ import { mapScheme } from '../landing/schemes';
 import { mapClaim } from '../landing/claims';
 import {
   mapDepotSettings, mapDepotTruck, mapDepotDispatch, mapDepotAdjustment, mapMaterialItem, mapMaterialMove,
-  mapDepotDayNote, mapSteelTest,
+  mapDepotDayNote, mapSteelTest, mapSteelBrand, mapSteelEstimate,
 } from '../depot/service';
 import { num } from '../../lib/num';
 import { firmWatermark } from '../../lib/caches';
@@ -27,6 +27,7 @@ function noChanges(): Record<string, unknown[] | null> {
     schemes: [], claims: [],
     labours: [], depotSettings: [], depotTrucks: [], depotDispatches: [], depotAdjustments: [],
     materialItems: [], materialMoves: [], depotDayNotes: [], steelTests: [],
+    steelBrands: [], steelEstimates: [],
   };
 }
 
@@ -210,6 +211,8 @@ export async function pull(
   changes.materialMoves = (await page('material_moves')).map(mapMaterialMove);
   changes.depotDayNotes = (await page('depot_day_notes')).map(mapDepotDayNote);
   changes.steelTests = (await page('steel_tests')).map(mapSteelTest);
+  changes.steelBrands = (await page('steel_brands')).map(mapSteelBrand);
+  changes.steelEstimates = (await page('steel_estimates')).map(mapSteelEstimate);
 
   // Cap at the earliest truncation point (see `page`). The cap must still make
   // forward progress: if a single table has more than `limit` rows sharing one

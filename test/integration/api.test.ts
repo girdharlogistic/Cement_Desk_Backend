@@ -881,6 +881,94 @@ describe('integration: auth, tenancy, CRUD, sync (§15.2/§15.3)', () => {
     expect(del.body.conflicts.length + del.body.applied.length).toBe(1);
   });
 
+  it('steel estimator: brands last-write-wins, estimates rev-gated, pull, counts, backup', async () => {
+    const f = await api('POST', '/firms', { name: `SteelEst-${Date.now()}` }, tokensA.accessToken);
+    const fid = f.body.firm.id;
+    const tok = tokensA.accessToken;
+    const push = (mutations: any[]) => api('POST', `/firms/${fid}/sync/push`, { deviceId: U(1200), mutations }, tok);
+    const [panther, tiscon, est] = [U(1201), U(1202), U(1203)];
+    const brand = (name: string, extra: any = {}) => ({
+      name, mode: 'perPiece', rateUnit: 'perKg', barLengthM: 12, rateUpdatedAt: '2026-10-01T06:30:00.000Z', order: 0,
+      sizes: [{ sizeMm: 8, lengthsPerBundle: 10, kgPerRod: 4.74, ratePerKg: 62 }, { sizeMm: 12, lengthsPerBundle: 5, kgPerRod: 10.66, ratePerKg: 60.5 }],
+      ...extra,
+    });
+    const estimate = (extra: any = {}) => ({
+      brandId: panther, brandName: 'Jindal Panther', mode: 'perPiece', customer: 'Ramesh ji', writtenAt: '2026-10-30T09:15:42.123456Z',
+      lines: [{ sizeMm: 8, pieces: 40, kg: 189.6, rate: 293.88, kgPerRod: 4.74, lengthsPerBundle: 10 }],
+      bindingWireKg: 5, bindingWireRate: 90, freightMode: 'perTonne', freightValue: 300, loadingMode: 'perBundle', loadingCharges: 20,
+      discountPct: 1.5, discountScope: 'steelAndMaterials', gstPct: 18,
+      compareBrandIds: [tiscon], compareBasis: 'kg', compareDiscounts: { [tiscon]: 2 },
+      ...extra,
+    });
+
+    const bad = await push([
+      { op: 'upsert', entity: 'steelBrands', id: U(1210), data: brand('  ') },
+      { op: 'upsert', entity: 'steelBrands', id: U(1211), data: brand('X', { mode: 'perTon' }) },
+      { op: 'upsert', entity: 'steelBrands', id: U(1212), data: brand('X', { sizes: [{ sizeMm: 8 }, { sizeMm: 8 }] }) },
+      { op: 'upsert', entity: 'steelBrands', id: U(1213), data: brand('X', { rateUpdatedAt: '1 Oct' }) },
+      { op: 'upsert', entity: 'steelEstimates', id: U(1214), data: estimate({ writtenAt: undefined }) },
+      { op: 'upsert', entity: 'steelEstimates', id: U(1215), data: estimate({ lines: [{ sizeMm: 8, pieces: -1 }] }) },
+      { op: 'upsert', entity: 'steelEstimates', id: U(1216), data: estimate({ compareDiscounts: { [tiscon]: 140 } }) },
+      { op: 'upsert', entity: 'steelEstimates', id: U(1217), data: estimate({ discountScope: 'freight' }) },
+    ]);
+    expect(bad.body.rejected.map((r: any) => r.code)).toEqual(Array(8).fill('VALIDATION_FAILED'));
+
+    const ok = await push([
+      { op: 'upsert', entity: 'steelBrands', id: panther, data: brand(' Jindal Panther ') },
+      { op: 'upsert', entity: 'steelBrands', id: tiscon, data: brand('Tata Tiscon', { mode: 'perKg', order: 1 }) },
+      { op: 'upsert', entity: 'steelEstimates', id: est, data: estimate() },
+    ]);
+    expect(ok.body.rejected).toEqual([]);
+    expect(ok.body.applied.map((a: any) => a.rev)).toEqual([1, 1, 1]);
+
+    // A brand is a master: a stale or missing rev still applies.
+    const lww = await push([{ op: 'upsert', entity: 'steelBrands', id: panther, rev: 9, data: brand('Jindal Panther', { rateUpdatedAt: '2026-10-29T12:00:00.000Z' }) }]);
+    expect(lww.body.applied[0].rev).toBe(2);
+    // An estimate is a record: a stale edit is told.
+    const stale = await push([{ op: 'upsert', entity: 'steelEstimates', id: est, rev: 5, data: estimate({ customer: 'Someone else' }) }]);
+    expect(stale.body.conflicts[0].server.customer).toBe('Ramesh ji');
+
+    const ch = (await api('GET', `/firms/${fid}/sync/pull?limit=1000`, undefined, tok)).body.changes;
+    const b = ch.steelBrands.find((x: any) => x.id === panther);
+    expect(b).toEqual(expect.objectContaining({ name: 'Jindal Panther', mode: 'perPiece', rateUnit: 'perKg', barLengthM: 12, rateUpdatedAt: '2026-10-29T12:00:00.000Z', order: 0, rev: 2 }));
+    expect(b.sizes[1]).toEqual({ sizeMm: 12, lengthsPerBundle: 5, kgPerRod: 10.66, ratePerKg: 60.5 });
+    const e = ch.steelEstimates.find((x: any) => x.id === est);
+    expect(e).toEqual(expect.objectContaining({
+      brandId: panther, customer: 'Ramesh ji', writtenAt: '2026-10-30T09:15:42.123456Z', freightMode: 'perTonne', loadingMode: 'perBundle',
+      discountScope: 'steelAndMaterials', gstPct: 18, compareBrandIds: [tiscon], compareBasis: 'kg', compareDiscounts: { [tiscon]: 2 },
+    }));
+    expect(e.lines[0]).toEqual({ sizeMm: 8, pieces: 40, kg: 189.6, rate: 293.88, kgPerRod: 4.74, lengthsPerBundle: 10 });
+    const counts = (await api('GET', `/firms/${fid}/sync/counts`, undefined, tok)).body.counts;
+    expect([counts.steelBrands, counts.steelEstimates]).toEqual([2, 1]);
+
+    // The brand can go while estimates written against it stay as they were.
+    const gone = await push([{ op: 'delete', entity: 'steelBrands', id: tiscon }]);
+    expect(gone.body.applied.length).toBe(1);
+
+    // Backup: the app's own keys, the estimate's instant as `date`, and an
+    // older app's zoneless times and enum ordinals read back on import.
+    const exp = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(exp.steelBrands.map((x: any) => x.name)).toEqual(['Jindal Panther']);
+    expect(exp.steelEstimates[0]).toEqual(expect.objectContaining({ date: '2026-10-30T09:15:42.123456Z', compareDiscounts: { [tiscon]: 2 } }));
+    const old = {
+      ...exp, schemaVersion: 4, confirmReplace: true,
+      steelBrands: [...exp.steelBrands, { id: U(1220), firmId: fid, name: 'Kamdhenu', mode: 1, rateUnit: 0, rateUpdatedAt: '2026-09-02T18:40:00.000', sizes: [{ sizeMm: 10, lengthsPerBundle: 7, kgPerRod: 7.4, ratePerKg: 58 }] }],
+      steelEstimates: [...exp.steelEstimates, { id: U(1221), brandId: U(1220), brandName: 'Kamdhenu', mode: 1, date: '2026-09-03T11:05:00.000', discountScope: 2, freightMode: 1, lines: [{ sizeMm: 10, pieces: 14, kg: 103.6, rate: 58 }] }],
+    };
+    const restore = await api('POST', `/firms/${fid}/import/backup?mode=replace`, old, tok);
+    expect(restore.status).toBe(200);
+    const back = (await api('GET', `/firms/${fid}/export/backup`, undefined, tok)).body;
+    expect(back.steelBrands.map((x: any) => [x.name, x.mode, x.rateUnit, x.rateUpdatedAt])).toEqual([
+      ['Jindal Panther', 'perPiece', 'perKg', '2026-10-29T12:00:00.000Z'], ['Kamdhenu', 'perKg', 'perPiece', '2026-09-02T18:40:00.000'],
+    ]);
+    const k = back.steelEstimates.find((x: any) => x.id === U(1221));
+    expect(k).toEqual(expect.objectContaining({ mode: 'perKg', date: '2026-09-03T11:05:00.000', discountScope: 'steelAndMaterials', freightMode: 'perTonne', loadingMode: 'flat' }));
+    expect(k.lines[0]).toEqual({ sizeMm: 10, pieces: 14, kg: 103.6, rate: 58, kgPerRod: 0, lengthsPerBundle: 0 });
+
+    const del = await push([{ op: 'delete', entity: 'steelEstimates', id: est, rev: 1 }]);
+    expect(del.body.conflicts.length + del.body.applied.length).toBe(1);
+  });
+
   it('import/export: v3 backup round-trip (§8.7, §15.5)', async () => {
     const f = await api('POST', '/firms', { name: `Backup-${Date.now()}` }, tokensA.accessToken);
     const fid = f.body.firm.id;

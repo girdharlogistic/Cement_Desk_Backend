@@ -963,6 +963,17 @@ order.
 |---|---|---|
 | `steelTests` | `{ date, sizeMm, createdBy, createdFor, note, lengthUnit, samples[] }` | `sizeMm` is the bar size (one per test). `samples` holds **1–4** `{ brand, grade, lengthMm, weightG, rate, rateUnit }`: `grade` is `fe415`/`fe500`/`fe500d`/`fe550`/`fe550d`/`fe600`; `lengthMm` (cut piece, mm, whatever `lengthUnit` it was typed in — `mm`/`cm`/`inch`), `weightG`, `rate` are non-negative; `rateUnit` is `perPiece`/`perKg`/`perQuintal`/`perTonne`. The server stores the measurements; deviation, real diameter and load are the client's arithmetic (IS 1786 nominal mass × length). **Reject on `rev` mismatch.** |
 
+### Steel estimator
+
+The steel estimate's brands and the estimates written against them (migration 0010). Until
+app 1.16 these lived on the device alone. Sync-only, after `steelTests` in the entity order.
+The server checks shape and stores; every total is the client's arithmetic.
+
+| Entity | Shape (`data`) | Rules |
+|---|---|---|
+| `steelBrands` | `{ name, mode, rateUnit, barLengthM, sizes[], rateUpdatedAt, order }` | `name` required (≤160). `mode` (how it is sold) and `rateUnit` (how its rates are typed) are `perPiece`/`perKg`. `barLengthM` is 0–30 (default 12). `sizes` is up to 20 `{ sizeMm, lengthsPerBundle, kgPerRod, ratePerKg }`, one per bar size (4–60 mm, no repeats); the rate is **always per kg** whatever `rateUnit` says. `rateUpdatedAt` is an **instant** (ISO-8601 date and time, sent in UTC; kept as sent). **Last-write-wins**, like a master. Delete is never refused: an estimate keeps its own copy of everything it took from the brand. |
+| `steelEstimates` | `{ brandId?, brandName, mode, customer, writtenAt, lines[], bindingWireKg, bindingWireRate, coverBlockQty, coverBlockRate, freightMode, freightValue, loadingMode, loadingCharges, discountPct, discountScope, gstPct, compareBrandIds[], compareBasis, compareDiscounts{} }` | `writtenAt` is an **instant**, like `rateUpdatedAt` — not a business date. `lines` is up to 50 `{ sizeMm, pieces, kg, rate, kgPerRod, lengthsPerBundle }`, frozen from the brand when the row was added (`rate` is ₹/piece or ₹/kg by `mode`). `brandId` and `compareBrandIds` (≤10) are plain references — a deleted brand is allowed. `freightMode` is `flat`/`perTonne`, `loadingMode` `flat`/`perBundle`, `discountScope` `steelOnly`/`steelAndMaterials`/`total`, `compareBasis` `pieces`/`kg`. `discountPct`, `gstPct` and each `compareDiscounts` value (`{brandId: percent}`) are 0–100; every other figure is non-negative. An unknown enum value is refused; an absent one takes the default. **Reject on `rev` mismatch.** |
+
 ---
 
 ## 11. Sync protocol
@@ -1189,9 +1200,11 @@ never during a free trial, never on monthly. Each referral carries
 Export returns the same v3 JSON shape the on-device backup uses, with a
 `Content-Disposition: attachment` header. Only live records are exported.
 
-Import accepts `schemaVersion` **1 to 5** and maps the legacy **integer** enums to strings —
+Import accepts `schemaVersion` **1 to 7** and maps the legacy **integer** enums to strings —
 this is the migration path for existing users' on-device backups. Version 4 added the steel
-estimator, which does not sync and is ignored here; version 5 added the depot diary
+estimator (`steelBrands`, `steelEstimates` — read since migration 0010; an estimate's instant is
+`date` in the file, and an older app wrote both instants without a zone, in device time, which is
+kept as written); version 5 added the depot diary
 (`labours`, `depotSettings`, `depotTrucks`, `depotDispatches`, `depotAdjustments`,
 `materialItems`, `materialMoves`, in the §10b shapes). Diary rows that point at a customer, company or grade the file and the firm do not
 have are **skipped with a warning**, not fatal. The export carries the same diary keys but

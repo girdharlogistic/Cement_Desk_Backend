@@ -47,6 +47,8 @@ export async function exportBackup(firmId: string): Promise<any> {
   const materialMoves = await grab<any>('SELECT * FROM material_moves WHERE firm_id = ? ORDER BY date', [firmId]);
   const depotDayNotes = await grab<any>('SELECT * FROM depot_day_notes WHERE firm_id = ? ORDER BY date', [firmId]);
   const steelTests = await grab<any>('SELECT * FROM steel_tests WHERE firm_id = ? ORDER BY date', [firmId]);
+  const steelBrands = await grab<any>('SELECT * FROM steel_brands WHERE firm_id = ? ORDER BY sort_order', [firmId]);
+  const steelEstimates = await grab<any>('SELECT * FROM steel_estimates WHERE firm_id = ? ORDER BY written_at', [firmId]);
 
   const d = (r: any) => (r.deleted_at ? true : false);
   const live = (rows: any[]) => rows.filter((r) => !d(r));
@@ -142,6 +144,7 @@ export async function exportBackup(firmId: string): Promise<any> {
       sentOn: r.sent_on,
       creditNotes: notes.filter((n) => n.claim_id === r.id).map((n) => ({ id: n.id, date: n.date, number: n.number, amount: num(n.amount) })),
     })),
-    ...exportDepot(firmId, labours, depotSettings, depotTrucks, depotDispatches, depotAdjustments, materialItems, materialMoves, depotDayNotes, steelTests),
+    ...exportDepot(firmId, labours, depotSettings, depotTrucks, depotDispatches, depotAdjustments, materialItems, materialMoves, depotDayNotes, steelTests,
+      steelBrands, steelEstimates),
   };
 }
